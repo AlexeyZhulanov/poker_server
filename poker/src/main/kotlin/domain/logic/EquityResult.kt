@@ -1,6 +1,8 @@
-package com.example.model
+package com.example.domain.logic
 
-import com.example.model.HandEvaluator.evaluate
+import com.example.domain.model.Card
+import com.example.domain.logic.HandEvaluator.evaluate
+import com.example.model.secureShuffle
 
 data class EquityResult(val wins: List<Double>, val ties: Double)
 
@@ -10,7 +12,7 @@ fun calculateEquity(
     iterations: Int = 10_000
 ): EquityResult {
     val usedCards = players.flatten() + community
-    val deck = CardDeck.buildFullDeck().filter { it !in usedCards }.toMutableList()
+    val deck = CardDeck.Companion.buildFullDeck().filter { it !in usedCards }.toMutableList()
     //val rng = Random.Default
 
     val wins = IntArray(players.size) { 0 }
@@ -51,7 +53,7 @@ fun calculateLiveOuts(
     community: List<Card>
 ): Pair<List<Card>, Boolean> {
     val usedCards = player + community + opponents.flatten()
-    val deck = CardDeck.buildFullDeck().filter { it !in usedCards }
+    val deck = CardDeck.Companion.buildFullDeck().filter { it !in usedCards }
     val missing = 5 - community.size
 
     if (missing == 0) return Pair(emptyList(), false)

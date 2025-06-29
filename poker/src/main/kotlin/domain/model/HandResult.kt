@@ -1,4 +1,4 @@
-package com.example.model
+package com.example.domain.model
 
 data class HandResult(
     val combination: PokerCombination,

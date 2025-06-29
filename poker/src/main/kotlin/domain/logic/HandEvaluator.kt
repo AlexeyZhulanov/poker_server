@@ -1,4 +1,10 @@
-package com.example.model
+package com.example.domain.logic
+
+import com.example.domain.model.Card
+import com.example.domain.model.EvaluatedHand
+import com.example.domain.model.HandResult
+import com.example.domain.model.PokerCombination
+import com.example.domain.model.Rank
 
 object HandEvaluator {
     fun evaluate(cards: List<Card>): HandResult {
