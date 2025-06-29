@@ -1,0 +1,97 @@
+# Created by https://www.toptal.com/developers/gitignore/api/kotlin,gradle,intellij,windows,macos,linux
+# Edit at https://www.toptal.com/developers/gitignore?templates=kotlin,gradle,intellij,windows,macos,linux
+
+### Gradle ###
+.gradle
+build/
+!build/cache/
+!build/reports/
+!build/test-results/
+
+# Ignore Gradle GUI config
+gradle-app.setting
+
+# Avoid ignoring Gradle wrapper jar file (.jar files are usually ignored)
+!gradle-wrapper.jar
+
+# Avoid ignoring Gradle wrapper properties file (wrapper properties files are usually ignored)
+!gradle/wrapper/gradle-wrapper.properties
+
+# Cache of project dependencies
+.gradletasknamecache
+
+# End of https://www.toptal.com/developers/gitignore/api/kotlin,gradle,intellij,windows,macos,linux
+
+### Kotlin ###
+# Compiled class files
+*.class
+
+# Log files
+*.log
+
+# Package files
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# virtual machine crash logs, see http://www.java.com/en/download/help/error_hotspot.xml
+hs_err_pid*
+replay_pid*
+# End of https://www.toptal.com/developers/gitignore/api/kotlin,gradle,intellij,windows,macos,linux
+
+### Linux, macOS, Windows ###
+# General
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Thumbnails
+._*
+Thumbs.db
+ehthumbs.db
+ehthumbs_vista.db
+
+# Folders
+.Trashes
+__MACOSX
+
+# End of https://www.toptal.com/developers/gitignore/api/kotlin,gradle,intellij,windows,macos,linux
+/poker/.idea/
+
+!gradle/wrapper/gradle-wrapper.jar
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+bin/
+!**/src/main/**/bin/
+!**/src/test/**/bin/
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+out/
+!**/src/main/**/out/
+!**/src/test/**/out/
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+
+### VS Code ###
+.vscode/
