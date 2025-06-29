@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="5112e1d0-c53f-451a-9c4d-4f9c92b37134" name="poker server">
+        <fileTransfer accessType="SFTP" host="amessenger.ru" port="22" sshConfigId="ea90ec84-d8c5-46c3-a7d7-8e6003b469ad" sshConfig="root@amessenger.ru:22 agent" authAgent="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
