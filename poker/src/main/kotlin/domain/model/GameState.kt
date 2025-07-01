@@ -11,5 +11,6 @@ data class GameState(
     val playerStates: List<PlayerState> = emptyList(),
     val dealerPosition: Int = 0,
     val activePlayerPosition: Int = 0,
-    val lastRaiseAmount: Long = 0
+    val lastRaiseAmount: Long = 0,
+    val showdownResults: Map<String, List<Card>>? = null
 )

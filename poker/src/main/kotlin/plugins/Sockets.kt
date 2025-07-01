@@ -45,21 +45,24 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                     // Слушаем входящие сообщения от этого клиента
                     for (frame in incoming) {
                         frame as? Frame.Text ?: continue
-                        val incomingMessage = Json.decodeFromString<IncomingMessage>(frame.readText())
-                        val engine = gameRoomService.getEngine(roomId)
 
-                        if (engine == null) {
-                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Game not found."))
-                            return@webSocket
+                        val engine = gameRoomService.getEngine(roomId)
+                        if (engine == null) { /* ... */ return@webSocket }
+
+                        val currentGameState = engine.getCurrentGameState() // Нужно добавить этот метод в GameEngine
+                        val activePlayerId = currentGameState.playerStates.getOrNull(currentGameState.activePlayerPosition)?.player?.userId
+
+                        if (activePlayerId != userId) {
+                            // Не ход этого игрока, ничего не делаем (или отправляем ошибку)
+                            continue
                         }
 
-                        // Проверяем, ход ли этого игрока
-                        // TODO: Добавить реальную проверку хода
+                        val incomingMessage = Json.decodeFromString<IncomingMessage>(frame.readText())
 
                         when (incomingMessage) {
                             is IncomingMessage.Fold -> engine.processFold(userId)
                             is IncomingMessage.Bet -> engine.processBet(userId, incomingMessage.amount)
-                            // TODO: Добавить обработку Check
+                            is IncomingMessage.Check -> engine.processCheck(userId) // <-- ДОБАВЛЕНА ОБРАБОТКА
                         }
                     }
                 } catch (e: Exception) {

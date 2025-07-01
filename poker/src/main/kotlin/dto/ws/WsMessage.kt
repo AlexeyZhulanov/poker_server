@@ -12,6 +12,8 @@ sealed interface OutgoingMessage {
     data class PlayerJoined(val username: String) : OutgoingMessage
     @Serializable
     data class PlayerLeft(val username: String) : OutgoingMessage
+    @Serializable
+    data class ErrorMessage(val message: String) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер
@@ -21,4 +23,6 @@ sealed interface IncomingMessage {
     data class Fold(val temp: String = "") : IncomingMessage // temp - временное поле
     @Serializable
     data class Bet(val amount: Long) : IncomingMessage
+    @Serializable
+    data class Check(val temp: String = "") : IncomingMessage
 }

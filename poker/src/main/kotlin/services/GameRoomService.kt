@@ -26,6 +26,8 @@ class GameRoomService {
             ownerId = owner.userId
         )
         rooms[roomId] = room
+        // Сразу создаем движок для новой комнаты
+        engines[roomId] = GameEngine(roomId, room.players, this)
         return room
     }
 
@@ -49,11 +51,6 @@ class GameRoomService {
         val updatedRoom = room.copy(players = room.players + player)
         rooms[roomId] = updatedRoom
 
-        // Если в комнате стало 2 игрока и игра еще не началась, запускаем ее
-        // todo здесь нужно будет задержку добавить, либо старт игры только по кнопке
-        if (updatedRoom.players.size == 2 && !engines.containsKey(roomId)) {
-            startNewGame(roomId)
-        }
         return updatedRoom
     }
 
@@ -80,15 +77,11 @@ class GameRoomService {
         }
     }
 
-    fun startNewGame(roomId: String) {
-        val room = rooms[roomId] ?: return
-        // Проверяем, достаточно ли игроков для старта
-        if (room.players.size < 2) return
-
-        val engine = GameEngine(roomId, room.players, this)
-        engines[roomId] = engine
-        engine.startNewHand()
+    suspend fun sendToPlayer(roomId: String, userId: String, message: OutgoingMessage) {
+        members[roomId]?.get(userId)?.sendSerialized(message)
     }
 
     fun getEngine(roomId: String): GameEngine? = engines[roomId]
+
+    fun getMembers(roomId: String) = members[roomId]
 }

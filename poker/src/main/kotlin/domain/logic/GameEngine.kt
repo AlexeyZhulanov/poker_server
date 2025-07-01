@@ -3,9 +3,11 @@ package com.example.domain.logic
 import com.example.domain.model.*
 import com.example.dto.ws.OutgoingMessage
 import com.example.services.GameRoomService
+import com.example.util.sendSerialized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 class GameEngine(
@@ -19,16 +21,23 @@ class GameEngine(
     private var deck = CardDeck()
     private var gameState: GameState = GameState(roomId = roomId)
     private var roundIsOver: Boolean = false
+    private var currentDealerPosition = -1
+
+    fun startGame() {
+        startNewHand()
+    }
 
     fun startNewHand() {
         // 1. Создаем новую колоду
         deck.newDeck()
+        roundIsOver = false
 
-        // 2. Определяем позиции (для простоты пока фиксируем)
-        val dealerPos = 0
-        val smallBlindPos = (dealerPos + 1) % players.size
-        val bigBlindPos = (dealerPos + 2) % players.size
-        val actionPos = (dealerPos + 3) % players.size
+        // 2. Двигаем дилера и блайнды
+        currentDealerPosition = (currentDealerPosition + 1) % players.size
+        val smallBlindPos = (currentDealerPosition + 1) % players.size
+        val bigBlindPos = (currentDealerPosition + 2) % players.size
+        // Действие начинает игрок после большого блайнда
+        val actionPos = (currentDealerPosition + 3) % players.size
 
         // 3. Создаем начальное состояние игроков
         val initialPlayerStates = players.mapIndexed { index, player ->
@@ -39,7 +48,8 @@ class GameEngine(
                     smallBlindPos -> 10L // Условный малый блайнд
                     bigBlindPos -> 20L // Условный большой блайнд
                     else -> 0L
-                }
+                },
+                handContribution = 0
             )
         }
 
@@ -48,7 +58,7 @@ class GameEngine(
             roomId = roomId,
             stage = GameStage.PRE_FLOP,
             playerStates = initialPlayerStates,
-            dealerPosition = dealerPos,
+            dealerPosition = currentDealerPosition,
             activePlayerPosition = actionPos,
             pot = 30L, // Сумма блайндов
             lastRaiseAmount = 20L // Последняя ставка равна большому блайнду
@@ -68,23 +78,50 @@ class GameEngine(
     }
 
     fun processCheck(userId: String) {
-        // TODO: Добавить валидацию (можно ли чекать?)
+        val playerState = gameState.playerStates.find { it.player.userId == userId } ?: return
+        val maxBetOnStreet = gameState.playerStates.maxOfOrNull { it.currentBet } ?: 0
+
+        if (playerState.currentBet != maxBetOnStreet) {
+            // Отправляем сообщение об ошибке конкретному игроку
+            launch {
+                val errorMessage = OutgoingMessage.ErrorMessage("Cannot check, you need to call or raise.")
+                gameRoomService.sendToPlayer(roomId, userId, errorMessage)
+            }
+            return
+        }
         advanceToNextPlayer()
     }
 
     fun processBet(userId: String, amount: Long) {
         val playerState = gameState.playerStates.find { it.player.userId == userId } ?: return
-        // TODO: Добавить полную валидацию (стек, мин/макс ставка)
-        if (amount < gameState.lastRaiseAmount) {
-            println("Bet amount is too small.")
-            return // Некорректная ставка
+        // Проверка, достаточно ли фишек у игрока
+        if (amount > playerState.player.stack) {
+            println("Action validation failed: Bet amount ($amount) is larger than stack (${playerState.player.stack}).")
+            return // Недостаточно фишек
+        }
+
+        val maxBetOnStreet = gameState.playerStates.maxOfOrNull { it.currentBet } ?: 0L
+        val amountToCall = maxBetOnStreet - playerState.currentBet
+
+        // Если ставка меньше, чем колл (и это не all-in), то это некорректное действие
+        if (amount < amountToCall && amount < playerState.player.stack) {
+            println("Action validation failed: Bet amount is too small to call.")
+            return
+        }
+
+        // Проверка на минимальный рейз (рейз должен быть не меньше предыдущего рейза)
+        val raiseAmount = amount - amountToCall
+        if (raiseAmount > 0 && raiseAmount < gameState.lastRaiseAmount && (playerState.player.stack - amount) > 0) {
+            println("Action validation failed: Raise amount is too small.")
+            return
         }
 
         val totalBet = playerState.currentBet + amount
         updatePlayerState(userId) {
             it.copy(
                 player = it.player.copy(stack = it.player.stack - amount), // Уменьшаем стек
-                currentBet = it.currentBet + amount // Увеличиваем ставку в текущем раунде
+                currentBet = it.currentBet + amount, // Увеличиваем ставку в текущем раунде
+                handContribution = it.handContribution + amount
             )
         }
         gameState = gameState.copy(
@@ -97,7 +134,17 @@ class GameEngine(
     private fun updatePlayerState(userId: String, transform: (PlayerState) -> PlayerState) {
         gameState = gameState.copy(
             playerStates = gameState.playerStates.map {
-                if (it.player.userId == userId) transform(it) else it
+                if (it.player.userId == userId) {
+                    val newState = transform(it)
+                    // Проверяем, не пошел ли игрок в all-in
+                    if (newState.player.stack <= 0) {
+                        newState.copy(isAllIn = true, player = newState.player.copy(stack = 0))
+                    } else {
+                        newState
+                    }
+                } else {
+                    it
+                }
             }
         )
     }
@@ -181,36 +228,98 @@ class GameEngine(
     }
 
     private fun handleShowdown() {
-        val contenders = gameState.playerStates.filter { !it.hasFolded }
-
-        if (contenders.size == 1) {
-            // Один оставшийся игрок забирает банк
-            val winnerState = contenders.first()
-            val updatedWinnerState = winnerState.copy(player = winnerState.player.copy(stack = winnerState.player.stack + gameState.pot))
-            updatePlayerState(winnerState.player.userId) { updatedWinnerState }
-        } else {
-            // Несколько игроков на вскрытии, оцениваем руки
-            val hands = contenders.map { playerState ->
-                playerState.player.userId to HandEvaluator.evaluate(playerState.cards + gameState.communityCards)
+        launch {
+            // Убедимся, что все ставки на столе включены в общий вклад игроков
+            // Это важно для корректного расчета банков
+            gameState.playerStates.forEach { ps ->
+                updatePlayerState(ps.player.userId) {
+                    it.copy(handContribution = it.handContribution + it.currentBet, currentBet = 0)
+                }
             }
-            val bestHandResult = hands.maxByOrNull { it.second }?.second
 
-            val winners = hands.filter { it.second == bestHandResult }
-            val prizePerWinner = gameState.pot / winners.size
+            // 1. Рассчитываем все банки (основной и побочные)
+            val pots = calculatePots()
 
-            winners.forEach { (userId, _) ->
-                val winnerState = gameState.playerStates.find { it.player.userId == userId }!!
-                val updatedWinnerState = winnerState.copy(player = winnerState.player.copy(stack = winnerState.player.stack + prizePerWinner))
-                updatePlayerState(userId) { updatedWinnerState }
+            // 2. Итерируем по каждому банку и определяем для него победителя
+            pots.forEach { pot ->
+                // Находим претендентов на этот конкретный банк
+                val contendersForPot = gameState.playerStates
+                    .filter { it.player.userId in pot.eligiblePlayerIds && !it.hasFolded }
+
+                if (contendersForPot.isEmpty()) return@forEach // Никто не претендует, пропускаем
+
+                if (contendersForPot.size == 1) {
+                    // Если на банк претендует один, он его и забирает
+                    distributeWinnings(listOf(contendersForPot.first().player.userId), pot.amount)
+                } else {
+                    // Несколько претендентов, оцениваем их руки
+                    val hands = contendersForPot.map { playerState ->
+                        playerState.player.userId to HandEvaluator.evaluateBestHandDetailed(playerState.cards + gameState.communityCards)
+                    }
+
+                    val bestHandResult = hands.maxByOrNull { it.second.result }?.second?.result
+                    val winners = hands.filter { it.second.result == bestHandResult }
+
+                    // Сохраняем выигрышные карты для отправки на клиент
+                    val showdownHands = winners.associate { (userId, evaluatedHand) -> userId to evaluatedHand.hand }
+                    gameState = gameState.copy(showdownResults = (gameState.showdownResults ?: emptyMap()) + showdownHands)
+
+                    // Распределяем этот конкретный банк между победителями
+                    distributeWinnings(winners.map { it.first }, pot.amount)
+                }
+            }
+
+            gameState = gameState.copy(stage = GameStage.SHOWDOWN)
+
+            broadcastGameState()
+            delay(8000L)
+
+            // Перед стартом новой руки очищаем результаты вскрытия
+            gameState = gameState.copy(showdownResults = null)
+            startNewHand()
+        }
+    }
+
+    private fun distributeWinnings(winnerIds: List<String>, totalPot: Long) {
+        val prizePerWinner = totalPot / winnerIds.size
+
+        winnerIds.forEach { winnerId ->
+            updatePlayerState(winnerId) { playerState ->
+                playerState.copy(player = playerState.player.copy(stack = playerState.player.stack + prizePerWinner))
             }
         }
+    }
 
-        gameState = gameState.copy(stage = GameStage.SHOWDOWN)
+    private fun calculatePots(): List<Pot> {
+        val pots = mutableListOf<Pot>()
+        // 1. Собираем информацию о всех, кто не сбросил карты
+        val contenders = gameState.playerStates
+            .filter { !it.hasFolded && it.handContribution > 0 }
+            .sortedBy { it.handContribution } // Сортируем по возрастанию их вклада в банк
 
-        // Отправляем финальное состояние со вскрытыми картами
-        launch { broadcastGameState() }
+        if (contenders.isEmpty()) return emptyList()
 
-        // TODO: Запланировать начало следующей раздачи через несколько секунд
+        // 2. Создаем список "слоев" ставок
+        val contributionLevels = contenders.map { it.handContribution }.distinct()
+        var lastLevel = 0L
+
+        // 3. Идем по каждому уровню ставок и формируем банки
+        contributionLevels.forEach { level ->
+            val potAmount = (level - lastLevel) * contenders.count { it.handContribution >= level }
+            val eligiblePlayerIds = contenders
+                .filter { it.handContribution >= level }
+                .map { it.player.userId }
+                .toSet()
+
+            pots.add(Pot(potAmount, eligiblePlayerIds))
+            lastLevel = level
+        }
+
+        // Объединяем банки с одинаковым набором претендентов
+        return pots.groupBy { it.eligiblePlayerIds }
+            .map { (ids, potList) ->
+                Pot(potList.sumOf { it.amount }, ids)
+            }
     }
 
     /**
@@ -222,11 +331,24 @@ class GameEngine(
     }
 
     private suspend fun broadcastGameState() {
-        // TODO: Отправлять каждому игроку его персональное состояние (с его картами),
-        // а остальным - публичное (без карт других игроков).
-        val message = OutgoingMessage.GameStateUpdate(gameState)
-        gameRoomService.broadcast(roomId, message)
+        // Получаем все сессии игроков в этой комнате
+        val currentMembers = gameRoomService.getMembers(roomId) ?: return
+
+        // Для каждого игрока создаем и отправляем его персональную версию состояния
+        currentMembers.forEach { (userId, session) ->
+            val personalizedState = gameState.copy(
+                playerStates = gameState.playerStates.map { playerState ->
+                    // Если это не текущий игрок И игра еще не на стадии вскрытия, скрываем его карты
+                    if (playerState.player.userId != userId && gameState.stage != GameStage.SHOWDOWN) {
+                        playerState.copy(cards = emptyList())
+                    } else {
+                        playerState
+                    }
+                }
+            )
+            session.sendSerialized(OutgoingMessage.GameStateUpdate(personalizedState))
+        }
     }
 
-    // Здесь будут методы для обработки действий: processFold, processBet, processCheck...
+    fun getCurrentGameState(): GameState = gameState
 }
