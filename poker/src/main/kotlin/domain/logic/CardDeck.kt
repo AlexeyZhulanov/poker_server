@@ -13,7 +13,7 @@ class CardDeck {
         newDeck()
     }
 
-    fun get(n: Int): List<Card> {
+    fun deal(n: Int): List<Card> {
         val list = mutableListOf<Card>()
         repeat(n) {
             list.add(cards.removeFirst())

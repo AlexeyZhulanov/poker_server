@@ -1,5 +1,6 @@
 package com.example.services
 
+import com.example.domain.logic.GameEngine
 import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
@@ -13,7 +14,7 @@ class GameRoomService {
     // Используем ConcurrentHashMap для потокобезопасного хранения комнат
     private val rooms = ConcurrentHashMap<String, GameRoom>()
     private val members = ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>>()
-
+    private val engines = ConcurrentHashMap<String, GameEngine>()
 
     fun createRoom(name: String, mode: GameMode, owner: Player): GameRoom {
         val roomId = UUID.randomUUID().toString()
@@ -47,6 +48,12 @@ class GameRoomService {
 
         val updatedRoom = room.copy(players = room.players + player)
         rooms[roomId] = updatedRoom
+
+        // Если в комнате стало 2 игрока и игра еще не началась, запускаем ее
+        // todo здесь нужно будет задержку добавить, либо старт игры только по кнопке
+        if (updatedRoom.players.size == 2 && !engines.containsKey(roomId)) {
+            startNewGame(roomId)
+        }
         return updatedRoom
     }
 
@@ -62,6 +69,7 @@ class GameRoomService {
         // Если в комнате не осталось активных сессий, можно ее удалить
         if (roomMembers.isNullOrEmpty()) {
             rooms.remove(roomId)
+            engines.remove(roomId)?.destroy()
             members.remove(roomId)
         }
     }
@@ -71,4 +79,16 @@ class GameRoomService {
             session.sendSerialized(message)
         }
     }
+
+    fun startNewGame(roomId: String) {
+        val room = rooms[roomId] ?: return
+        // Проверяем, достаточно ли игроков для старта
+        if (room.players.size < 2) return
+
+        val engine = GameEngine(roomId, room.players, this)
+        engines[roomId] = engine
+        engine.startNewHand()
+    }
+
+    fun getEngine(roomId: String): GameEngine? = engines[roomId]
 }

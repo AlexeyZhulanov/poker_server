@@ -1,13 +1,13 @@
 package com.example.dto.ws
 
-import com.example.domain.model.GameRoom
+import com.example.domain.model.GameState
 import kotlinx.serialization.Serializable
 
 // Сообщения, которые сервер отправляет клиенту
 @Serializable
 sealed interface OutgoingMessage {
     @Serializable
-    data class GameStateUpdate(val room: GameRoom) : OutgoingMessage
+    data class GameStateUpdate(val state: GameState) : OutgoingMessage
     @Serializable
     data class PlayerJoined(val username: String) : OutgoingMessage
     @Serializable

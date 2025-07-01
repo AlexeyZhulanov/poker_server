@@ -1,5 +1,6 @@
 package com.example.plugins
 
+import com.example.dto.ws.IncomingMessage
 import com.example.dto.ws.OutgoingMessage
 import com.example.services.GameRoomService
 import io.ktor.server.application.*
@@ -9,6 +10,7 @@ import io.ktor.server.auth.principal
 import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
+import kotlinx.serialization.json.Json
 import kotlin.time.Duration.Companion.seconds
 
 fun Application.configureSockets(gameRoomService: GameRoomService) {
@@ -43,7 +45,22 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                     // Слушаем входящие сообщения от этого клиента
                     for (frame in incoming) {
                         frame as? Frame.Text ?: continue
-                        // TODO: Десериализовать frame.readText() в IncomingMessage и обработать действие
+                        val incomingMessage = Json.decodeFromString<IncomingMessage>(frame.readText())
+                        val engine = gameRoomService.getEngine(roomId)
+
+                        if (engine == null) {
+                            close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "Game not found."))
+                            return@webSocket
+                        }
+
+                        // Проверяем, ход ли этого игрока
+                        // TODO: Добавить реальную проверку хода
+
+                        when (incomingMessage) {
+                            is IncomingMessage.Fold -> engine.processFold(userId)
+                            is IncomingMessage.Bet -> engine.processBet(userId, incomingMessage.amount)
+                            // TODO: Добавить обработку Check
+                        }
                     }
                 } catch (e: Exception) {
                     println(e.localizedMessage)
