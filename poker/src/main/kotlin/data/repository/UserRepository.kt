@@ -3,11 +3,13 @@ package com.example.data.repository
 import com.example.data.entity.Users
 import com.example.dto.RegisterRequest
 import com.example.data.DatabaseFactory.dbQuery
+import com.example.domain.model.GameRoom
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.or
 import org.jetbrains.exposed.sql.selectAll
 import java.math.BigDecimal
+import java.util.UUID
 
 class UserRepository {
 
@@ -26,6 +28,12 @@ class UserRepository {
     suspend fun findByUsername(username: String): ResultRow? {
         return dbQuery {
             Users.selectAll().where { Users.username eq username }.singleOrNull()
+        }
+    }
+
+    suspend fun findById(id: UUID): ResultRow? {
+        return dbQuery {
+            Users.selectAll().where { Users.id eq id }.singleOrNull()
         }
     }
 
