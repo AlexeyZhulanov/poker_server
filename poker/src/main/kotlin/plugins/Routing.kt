@@ -3,10 +3,14 @@ package com.example.plugins
 import com.example.data.entity.Users
 import com.example.data.repository.UserRepository
 import com.example.dto.AuthResponse
+import com.example.dto.LoginRequest
 import com.example.dto.RegisterRequest
 import com.example.services.TokenService
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
+import io.ktor.server.auth.authenticate
+import io.ktor.server.auth.jwt.JWTPrincipal
+import io.ktor.server.auth.principal
 import io.ktor.server.request.receive
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -45,6 +49,43 @@ fun Application.configureRouting() {
                 val (accessToken, refreshToken) = tokenService.generateTokens(userId)
 
                 call.respond(HttpStatusCode.Created, AuthResponse(accessToken, refreshToken))
+            }
+
+            post("/login") {
+                val request = call.receive<LoginRequest>()
+
+                // 1. Ищем пользователя в БД
+                val user = userRepository.findByUsername(request.username)
+                if (user == null) {
+                    call.respond(HttpStatusCode.Unauthorized, "Invalid username or password")
+                    return@post
+                }
+
+                // 2. Проверяем пароль
+                val passwordMatches = BCrypt.checkpw(request.password, user[Users.passwordHash])
+                if (!passwordMatches) {
+                    call.respond(HttpStatusCode.Unauthorized, "Invalid username or password")
+                    return@post
+                }
+
+                // 3. Генерируем новую пару токенов
+                val userId = user[Users.id]
+                val (accessToken, refreshToken) = tokenService.generateTokens(userId)
+
+                call.respond(HttpStatusCode.OK, AuthResponse(accessToken, refreshToken))
+            }
+        }
+
+        authenticate("auth-jwt") {
+            get("/me") {
+                // Если мы попали сюда, значит токен валиден.
+                // Ktor уже извлек из него данные и положил в call.principal()
+                val principal = call.principal<JWTPrincipal>()
+                val userId = principal?.payload?.getClaim("userId")?.asString()
+
+                // Здесь можно по userId сходить в БД и вернуть полную информацию
+                // Но пока просто вернем ID из токена
+                call.respondText("Hello, you are an authenticated user with ID: $userId")
             }
         }
     }

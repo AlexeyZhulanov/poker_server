@@ -23,6 +23,12 @@ class UserRepository {
         }
     }
 
+    suspend fun findByUsername(username: String): ResultRow? {
+        return dbQuery {
+            Users.selectAll().where { Users.username eq username }.singleOrNull()
+        }
+    }
+
     suspend fun findByUsernameOrEmail(username: String, email: String): ResultRow? {
         return dbQuery {
             Users.selectAll().where {
