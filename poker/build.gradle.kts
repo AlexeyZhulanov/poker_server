@@ -16,6 +16,9 @@ repositories {
 }
 
 dependencies {
+    implementation(libs.jbcrypt)
+    implementation(libs.jwt.creator)
+
     // Ktor plugins
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.netty)

@@ -3,7 +3,7 @@ package com.example.domain.logic
 import com.example.domain.model.Card
 import com.example.domain.model.Rank
 import com.example.domain.model.Suit
-import com.example.model.secureShuffle
+import com.example.util.secureShuffle
 import java.util.*
 
 class CardDeck {
