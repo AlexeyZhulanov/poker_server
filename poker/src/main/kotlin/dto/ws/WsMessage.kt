@@ -4,6 +4,16 @@ import com.example.domain.model.Card
 import com.example.domain.model.GameState
 import kotlinx.serialization.Serializable
 
+@Serializable
+sealed interface OutsInfo {
+    @Serializable
+    data class DirectOuts(val cards: List<Card>) : OutsInfo
+    @Serializable
+    data object RunnerRunner : OutsInfo
+    @Serializable
+    data object DrawingDead : OutsInfo
+}
+
 // Сообщения, которые сервер отправляет клиенту
 @Serializable
 sealed interface OutgoingMessage {
@@ -22,7 +32,7 @@ sealed interface OutgoingMessage {
     @Serializable
     data class AllInEquityUpdate(
         val equities: Map<String, Double>, // <UserID, Equity>
-        val outs: Map<String, List<Card>> = emptyMap() // <UserID, List<WinningCards>>
+        val outs: Map<String, OutsInfo> = emptyMap() // <UserID, OutsInfo>
     ) : OutgoingMessage
 }
 

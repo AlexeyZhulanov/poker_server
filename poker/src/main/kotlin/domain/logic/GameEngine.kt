@@ -2,6 +2,7 @@ package com.example.domain.logic
 
 import com.example.domain.model.*
 import com.example.dto.ws.OutgoingMessage
+import com.example.dto.ws.OutsInfo
 import com.example.services.GameRoomService
 import com.example.util.sendSerialized
 import kotlinx.coroutines.CoroutineScope
@@ -134,8 +135,9 @@ class GameEngine(
 
     fun processFold(userId: String) {
         updatePlayerState(userId) { it.copy(hasFolded = true) }
-        checkForAllInShowdown()
-        advanceToNextPlayer()
+        if (!checkForAllInShowdown()) {
+            advanceToNextPlayer()
+        }
     }
 
     fun processCheck(userId: String) {
@@ -150,8 +152,9 @@ class GameEngine(
             }
             return
         }
-        checkForAllInShowdown()
-        advanceToNextPlayer()
+        if (!checkForAllInShowdown()) {
+            advanceToNextPlayer()
+        }
     }
 
     fun processBet(userId: String, amount: Long) {
@@ -190,8 +193,9 @@ class GameEngine(
             pot = gameState.pot + amount,
             lastRaiseAmount = if (totalBet > gameState.lastRaiseAmount) totalBet - gameState.lastRaiseAmount else gameState.lastRaiseAmount
         )
-        checkForAllInShowdown()
-        advanceToNextPlayer()
+        if (!checkForAllInShowdown()) {
+            advanceToNextPlayer()
+        }
     }
 
     private fun updatePlayerState(userId: String, transform: (PlayerState) -> PlayerState) {
@@ -243,14 +247,15 @@ class GameEngine(
         }
     }
 
-    private fun advanceToNextStage() {
-        // Сбрасываем флаг окончания раунда
-        roundIsOver = false
+    private fun advanceToNextStage(isAllInShowdown: Boolean = false) {
+        // 1. Сначала сбрасываем ставки игроков с прошлого раунда, если это не all-in шоудаун
+        if (!isAllInShowdown) {
+            val newPlayerStates = gameState.playerStates.map { it.copy(currentBet = 0) }
+            gameState = gameState.copy(playerStates = newPlayerStates, lastRaiseAmount = 0)
+            roundIsOver = false
+        }
 
-        // Сбрасываем ставки игроков для нового раунда
-        val newPlayerStates = gameState.playerStates.map { it.copy(currentBet = 0) }
-        gameState = gameState.copy(playerStates = newPlayerStates, lastRaiseAmount = 0)
-
+        // 2. Раздаем карты на стол в зависимости от текущей стадии
         when (gameState.stage) {
             GameStage.PRE_FLOP -> {
                 gameState = gameState.copy(
@@ -271,22 +276,29 @@ class GameEngine(
                 )
             }
             GameStage.RIVER -> {
-                // После ривера идет вскрытие
                 gameState = gameState.copy(stage = GameStage.SHOWDOWN)
-                handleShowdown()
+                // Если мы дошли до ривера в режиме all-in, шоудаун уже обрабатывается в executeStagedShowdown
+                if (!isAllInShowdown) {
+                    handleShowdown()
+                }
                 return
             }
-            else -> { /* SHOWDOWN */ }
+            GameStage.SHOWDOWN -> return // Уже на вскрытии, ничего не делаем
         }
 
-        // Находим первого игрока для нового раунда (слева от дилера)
+        // 3. Если это all-in шоудаун, мы просто рассылаем состояние с новыми картами и выходим
+        if (isAllInShowdown) {
+            launch { broadcastGameState() }
+            return
+        }
+
+        // 4. Эта логика выполняется только для обычных раундов торгов
         var firstToAct = (gameState.dealerPosition + 1) % playersInGame.size
         while (gameState.playerStates[firstToAct].hasFolded || gameState.playerStates[firstToAct].isAllIn) {
             firstToAct = (firstToAct + 1) % playersInGame.size
         }
         gameState = gameState.copy(activePlayerPosition = firstToAct)
 
-        // Рассылаем обновленное состояние
         launch { broadcastGameState() }
     }
 
@@ -414,43 +426,68 @@ class GameEngine(
         }
     }
 
-    private fun checkForAllInShowdown() {
+    private fun checkForAllInShowdown(): Boolean {
         val activePlayers = gameState.playerStates.filter { !it.hasFolded }
         val playersInAllIn = activePlayers.filter { it.isAllIn }
 
         // Условие для шоудауна: как минимум два игрока не сбросили, и не более одного из них может еще действовать.
         if (activePlayers.size >= 2 && (activePlayers.size - playersInAllIn.size) <= 1) {
-
-            // Запускаем тяжелый расчет эквити в фоновой корутине
-            launch {
-                // Собираем данные для калькулятора
-                val equityPlayers = activePlayers.map { it.cards }
-                val equityResult = calculateEquity(equityPlayers, gameState.communityCards)
-
-                // Сопоставляем результаты с ID игроков
-                val equitiesMap = activePlayers.mapIndexed { index, playerState ->
-                    playerState.player.userId to equityResult.wins[index]
-                }.toMap()
-
-                // Отправляем результаты
-                val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap)
-                gameRoomService.broadcast(room.roomId, equityMessage)
-            }
-
-            // Пока эквити считается в фоне, мы можем раздать все оставшиеся карты
-            dealRemainingCommunityCards()
-            handleShowdown() // Сразу переходим к финальному распределению банка
+            // Запускаем поэтапный шоудаун в отдельной корутине
+            launch { executeStagedShowdown() }
+            return true // Сигнализируем, что начался all-in шоудаун
         }
+        return false
     }
 
-    // Вспомогательный метод для раздачи всех карт до ривера
-    private fun dealRemainingCommunityCards() {
-        val cardsToDeal = 5 - gameState.communityCards.size
-        if (cardsToDeal > 0) {
-            gameState = gameState.copy(
-                communityCards = gameState.communityCards + deck.deal(cardsToDeal)
-            )
+    private suspend fun executeStagedShowdown() {
+        // Цикл работает, пока мы не дойдем до ривера
+        while (gameState.stage != GameStage.SHOWDOWN) {
+            // --- Расчет эквити и аутов для текущей стадии ---
+            val contenders = gameState.playerStates.filter { !it.hasFolded }
+
+            val equityPlayersHands = contenders.map { it.cards }
+            val equityResult = calculateEquity(equityPlayersHands, gameState.communityCards)
+
+            val equitiesMap = contenders.mapIndexed { index, playerState ->
+                playerState.player.userId to equityResult.wins[index]
+            }.toMap()
+
+            // Находим игрока с лучшими шансами
+            val topEquityPlayerId = equitiesMap.maxByOrNull { it.value }?.key
+
+            // Считаем ауты для всех, кроме фаворита
+            val outsMap = mutableMapOf<String, OutsInfo>()
+            if (topEquityPlayerId != null) {
+                contenders.filter { it.player.userId != topEquityPlayerId }.forEach { underdog ->
+                    val opponentHands = contenders
+                        .filter { it.player.userId != underdog.player.userId }
+                        .map { it.cards }
+
+                    val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, gameState.communityCards)
+
+                    // Формируем правильный объект OutsInfo
+                    val outsInfo = when {
+                        directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
+                        hasIndirectOuts -> OutsInfo.RunnerRunner
+                        else -> OutsInfo.DrawingDead
+                    }
+                    outsMap[underdog.player.userId] = outsInfo
+                }
+            }
+
+            // Отправляем сообщение с эквити и аутами
+            val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap)
+            gameRoomService.broadcast(room.roomId, equityMessage)
+
+            // Пауза, чтобы игроки успели увидеть шансы
+            delay(3000L)
+
+            // Переходим к следующей стадии (раздаем флоп, терн или ривер)
+            advanceToNextStage(isAllInShowdown = true)
         }
+
+        // Когда цикл завершился (после ривера), просто распределяем банк
+        handleShowdown()
     }
 
     fun getCurrentGameState(): GameState = gameState
