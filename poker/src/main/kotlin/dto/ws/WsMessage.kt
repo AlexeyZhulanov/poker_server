@@ -45,6 +45,11 @@ sealed interface OutgoingMessage {
     data class RunItMultipleTimesResult(val results: List<BoardResult>) : OutgoingMessage
     @Serializable
     data class OfferRunItMultipleTimes(val options: List<Int>) : OutgoingMessage
+    @Serializable
+    data class SocialActionBroadcast(
+        val fromPlayerId: String, // ID того, кто совершил действие
+        val action: SocialAction // Само действие
+    ) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер
@@ -58,4 +63,6 @@ sealed interface IncomingMessage {
     data class Check(val temp: String = "") : IncomingMessage
     @Serializable
     data class SelectRunCount(val times: Int) : IncomingMessage
+    @Serializable
+    data class PerformSocialAction(val action: SocialAction) : IncomingMessage
 }

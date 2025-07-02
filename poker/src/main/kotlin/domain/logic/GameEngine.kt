@@ -1,9 +1,7 @@
 package com.example.domain.logic
 
 import com.example.domain.model.*
-import com.example.dto.ws.BoardResult
-import com.example.dto.ws.OutgoingMessage
-import com.example.dto.ws.OutsInfo
+import com.example.dto.ws.*
 import com.example.services.GameRoomService
 import com.example.util.secureShuffle
 import com.example.util.sendSerialized
@@ -587,4 +585,15 @@ class GameEngine(
     }
 
     fun getCurrentGameState(): GameState = gameState
+
+    fun processSocialAction(senderUserId: String, action: SocialAction) {
+        val broadcastMessage = OutgoingMessage.SocialActionBroadcast(
+            fromPlayerId = senderUserId,
+            action = action
+        )
+        // Рассылаем всем в комнате
+        launch {
+            gameRoomService.broadcast(room.roomId, broadcastMessage)
+        }
+    }
 }
