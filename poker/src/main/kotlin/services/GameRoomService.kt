@@ -27,7 +27,7 @@ class GameRoomService {
         )
         rooms[roomId] = room
         // Сразу создаем движок для новой комнаты
-        engines[roomId] = GameEngine(roomId, room.players, this)
+        engines[roomId] = GameEngine(room, this)
         return room
     }
 

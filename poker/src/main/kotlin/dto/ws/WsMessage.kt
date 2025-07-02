@@ -1,5 +1,6 @@
 package com.example.dto.ws
 
+import com.example.domain.model.Card
 import com.example.domain.model.GameState
 import kotlinx.serialization.Serializable
 
@@ -14,6 +15,15 @@ sealed interface OutgoingMessage {
     data class PlayerLeft(val username: String) : OutgoingMessage
     @Serializable
     data class ErrorMessage(val message: String) : OutgoingMessage
+    @Serializable
+    data class BlindsUp(val smallBlind: Long, val bigBlind: Long, val level: Int) : OutgoingMessage
+    @Serializable
+    data class TournamentWinner(val winnerUsername: String) : OutgoingMessage
+    @Serializable
+    data class AllInEquityUpdate(
+        val equities: Map<String, Double>, // <UserID, Equity>
+        val outs: Map<String, List<Card>> = emptyMap() // <UserID, List<WinningCards>>
+    ) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер

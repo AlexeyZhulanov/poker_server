@@ -8,45 +8,105 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class GameEngine(
-    private val roomId: String,
-    private val players: List<Player>,
+    private val room: GameRoom,
     private val gameRoomService: GameRoomService
 ) : CoroutineScope {
     private val job = Job()
     override val coroutineContext = job + Dispatchers.Default
 
     private var deck = CardDeck()
-    private var gameState: GameState = GameState(roomId = roomId)
+    private var gameState: GameState = GameState(roomId = room.roomId)
     private var roundIsOver: Boolean = false
     private var currentDealerPosition = -1
+    private var currentLevelIndex = 0
+    private var blindIncreaseJob: Job? = null // Job для таймера повышения блайндов
+    private var playersInGame: List<Player> = emptyList()
+
+    init {
+        // Если это турнир, запускаем таймер
+        if (room.gameMode == GameMode.TOURNAMENT && room.levelDurationMinutes != null) {
+            startBlindTimer(room.levelDurationMinutes)
+        }
+    }
+
+    private fun startBlindTimer(durationMinutes: Int) {
+        blindIncreaseJob = launch {
+            while (isActive) {
+                delay(durationMinutes * 60 * 1000L)
+                currentLevelIndex++
+
+                // Получаем информацию о новом уровне блайндов
+                val newLevel = room.blindStructure?.getOrNull(currentLevelIndex)
+                if (newLevel != null) {
+                    // Создаем и рассылаем сообщение
+                    val message = OutgoingMessage.BlindsUp(newLevel.smallBlind, newLevel.bigBlind, newLevel.level)
+                    gameRoomService.broadcast(room.roomId, message)
+                }
+            }
+        }
+    }
 
     fun startGame() {
         startNewHand()
     }
 
     fun startNewHand() {
-        // 1. Создаем новую колоду
+        // 1. Определяем игроков для новой раздачи (у кого есть стек)
+        this.playersInGame = if (gameState.playerStates.isEmpty()) {
+            // Первая раздача, берем всех из комнаты
+            room.players
+        } else {
+            // Последующие раздачи, фильтруем тех, у кого остались фишки
+            gameState.playerStates.filter { it.player.stack > 0 }.map { it.player }
+        }
+
+        // 2. Проверяем, не закончился ли турнир
+        if (playersInGame.size < 2 && room.gameMode == GameMode.TOURNAMENT) {
+            val winnerUsername = playersInGame.firstOrNull()?.username ?: "Unknown"
+            // Отправляем всем сообщение о победителе
+            launch {
+                gameRoomService.broadcast(room.roomId, OutgoingMessage.TournamentWinner(winnerUsername))
+            }
+            destroy() // Останавливаем движок
+            return
+        }
+
+        // 3. Создаем новую колоду
         deck.newDeck()
         roundIsOver = false
+        val smallBlindAmount: Long
+        val bigBlindAmount: Long
 
-        // 2. Двигаем дилера и блайнды
-        currentDealerPosition = (currentDealerPosition + 1) % players.size
-        val smallBlindPos = (currentDealerPosition + 1) % players.size
-        val bigBlindPos = (currentDealerPosition + 2) % players.size
+        // Получаем блайнды в зависимости от режима игры
+        if (room.gameMode == GameMode.TOURNAMENT && room.blindStructure != null) {
+            val currentLevel = room.blindStructure.getOrNull(currentLevelIndex) ?: room.blindStructure.last()
+            smallBlindAmount = currentLevel.smallBlind
+            bigBlindAmount = currentLevel.bigBlind
+        } else {
+            // Фиксированные блайнды для кэш-игры
+            smallBlindAmount = 10L
+            bigBlindAmount = 20L
+        }
+
+        // 4. Двигаем дилера и блайнды
+        currentDealerPosition = (currentDealerPosition + 1) % playersInGame.size
+        val smallBlindPos = (currentDealerPosition + 1) % playersInGame.size
+        val bigBlindPos = (currentDealerPosition + 2) % playersInGame.size
         // Действие начинает игрок после большого блайнда
-        val actionPos = (currentDealerPosition + 3) % players.size
+        val actionPos = (currentDealerPosition + 3) % playersInGame.size
 
-        // 3. Создаем начальное состояние игроков
-        val initialPlayerStates = players.mapIndexed { index, player ->
+        // 5. Создаем начальное состояние игроков
+        val initialPlayerStates = playersInGame.mapIndexed { index, player ->
             PlayerState(
                 player = player,
                 cards = deck.deal(2), // Раздаем 2 карты каждому
                 currentBet = when (index) {
-                    smallBlindPos -> 10L // Условный малый блайнд
-                    bigBlindPos -> 20L // Условный большой блайнд
+                    smallBlindPos -> smallBlindAmount
+                    bigBlindPos -> bigBlindAmount
                     else -> 0L
                 },
                 handContribution = 0
@@ -55,13 +115,13 @@ class GameEngine(
 
         // 4. Формируем начальное состояние игры
         gameState = GameState(
-            roomId = roomId,
+            roomId = room.roomId,
             stage = GameStage.PRE_FLOP,
             playerStates = initialPlayerStates,
             dealerPosition = currentDealerPosition,
             activePlayerPosition = actionPos,
-            pot = 30L, // Сумма блайндов
-            lastRaiseAmount = 20L // Последняя ставка равна большому блайнду
+            pot = bigBlindAmount + smallBlindAmount, // Сумма блайндов
+            lastRaiseAmount = bigBlindAmount // Последняя ставка равна большому блайнду
         )
 
         // 5. Рассылаем всем обновленное состояние
@@ -74,6 +134,7 @@ class GameEngine(
 
     fun processFold(userId: String) {
         updatePlayerState(userId) { it.copy(hasFolded = true) }
+        checkForAllInShowdown()
         advanceToNextPlayer()
     }
 
@@ -85,10 +146,11 @@ class GameEngine(
             // Отправляем сообщение об ошибке конкретному игроку
             launch {
                 val errorMessage = OutgoingMessage.ErrorMessage("Cannot check, you need to call or raise.")
-                gameRoomService.sendToPlayer(roomId, userId, errorMessage)
+                gameRoomService.sendToPlayer(room.roomId, userId, errorMessage)
             }
             return
         }
+        checkForAllInShowdown()
         advanceToNextPlayer()
     }
 
@@ -128,6 +190,7 @@ class GameEngine(
             pot = gameState.pot + amount,
             lastRaiseAmount = if (totalBet > gameState.lastRaiseAmount) totalBet - gameState.lastRaiseAmount else gameState.lastRaiseAmount
         )
+        checkForAllInShowdown()
         advanceToNextPlayer()
     }
 
@@ -160,11 +223,11 @@ class GameEngine(
         }
 
         val startPos = gameState.activePlayerPosition
-        var nextPos = (startPos + 1) % players.size
+        var nextPos = (startPos + 1) % playersInGame.size
 
         // Ищем следующего активного игрока
         while (gameState.playerStates[nextPos].hasFolded || gameState.playerStates[nextPos].isAllIn) {
-            nextPos = (nextPos + 1) % players.size
+            nextPos = (nextPos + 1) % playersInGame.size
         }
 
         // Проверяем, закончился ли круг торгов
@@ -217,9 +280,9 @@ class GameEngine(
         }
 
         // Находим первого игрока для нового раунда (слева от дилера)
-        var firstToAct = (gameState.dealerPosition + 1) % players.size
+        var firstToAct = (gameState.dealerPosition + 1) % playersInGame.size
         while (gameState.playerStates[firstToAct].hasFolded || gameState.playerStates[firstToAct].isAllIn) {
-            firstToAct = (firstToAct + 1) % players.size
+            firstToAct = (firstToAct + 1) % playersInGame.size
         }
         gameState = gameState.copy(activePlayerPosition = firstToAct)
 
@@ -327,12 +390,13 @@ class GameEngine(
      * чтобы остановить все запущенные корутины и избежать утечек памяти.
      */
     fun destroy() {
+        blindIncreaseJob?.cancel()
         job.cancel()
     }
 
     private suspend fun broadcastGameState() {
         // Получаем все сессии игроков в этой комнате
-        val currentMembers = gameRoomService.getMembers(roomId) ?: return
+        val currentMembers = gameRoomService.getMembers(room.roomId) ?: return
 
         // Для каждого игрока создаем и отправляем его персональную версию состояния
         currentMembers.forEach { (userId, session) ->
@@ -347,6 +411,45 @@ class GameEngine(
                 }
             )
             session.sendSerialized(OutgoingMessage.GameStateUpdate(personalizedState))
+        }
+    }
+
+    private fun checkForAllInShowdown() {
+        val activePlayers = gameState.playerStates.filter { !it.hasFolded }
+        val playersInAllIn = activePlayers.filter { it.isAllIn }
+
+        // Условие для шоудауна: как минимум два игрока не сбросили, и не более одного из них может еще действовать.
+        if (activePlayers.size >= 2 && (activePlayers.size - playersInAllIn.size) <= 1) {
+
+            // Запускаем тяжелый расчет эквити в фоновой корутине
+            launch {
+                // Собираем данные для калькулятора
+                val equityPlayers = activePlayers.map { it.cards }
+                val equityResult = calculateEquity(equityPlayers, gameState.communityCards)
+
+                // Сопоставляем результаты с ID игроков
+                val equitiesMap = activePlayers.mapIndexed { index, playerState ->
+                    playerState.player.userId to equityResult.wins[index]
+                }.toMap()
+
+                // Отправляем результаты
+                val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap)
+                gameRoomService.broadcast(room.roomId, equityMessage)
+            }
+
+            // Пока эквити считается в фоне, мы можем раздать все оставшиеся карты
+            dealRemainingCommunityCards()
+            handleShowdown() // Сразу переходим к финальному распределению банка
+        }
+    }
+
+    // Вспомогательный метод для раздачи всех карт до ривера
+    private fun dealRemainingCommunityCards() {
+        val cardsToDeal = 5 - gameState.communityCards.size
+        if (cardsToDeal > 0) {
+            gameState = gameState.copy(
+                communityCards = gameState.communityCards + deck.deal(cardsToDeal)
+            )
         }
     }
 
