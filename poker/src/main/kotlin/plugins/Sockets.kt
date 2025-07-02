@@ -62,7 +62,8 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                         when (incomingMessage) {
                             is IncomingMessage.Fold -> engine.processFold(userId)
                             is IncomingMessage.Bet -> engine.processBet(userId, incomingMessage.amount)
-                            is IncomingMessage.Check -> engine.processCheck(userId) // <-- ДОБАВЛЕНА ОБРАБОТКА
+                            is IncomingMessage.Check -> engine.processCheck(userId)
+                            is IncomingMessage.SelectRunCount -> engine.processRunItSelection(userId, incomingMessage.times)
                         }
                     }
                 } catch (e: Exception) {

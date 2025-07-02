@@ -14,6 +14,13 @@ sealed interface OutsInfo {
     data object DrawingDead : OutsInfo
 }
 
+// Результат для одной доски
+@Serializable
+data class BoardResult(
+    val board: List<Card>,
+    val winnerUsernames: List<String>
+)
+
 // Сообщения, которые сервер отправляет клиенту
 @Serializable
 sealed interface OutgoingMessage {
@@ -34,6 +41,10 @@ sealed interface OutgoingMessage {
         val equities: Map<String, Double>, // <UserID, Equity>
         val outs: Map<String, OutsInfo> = emptyMap() // <UserID, OutsInfo>
     ) : OutgoingMessage
+    @Serializable
+    data class RunItMultipleTimesResult(val results: List<BoardResult>) : OutgoingMessage
+    @Serializable
+    data class OfferRunItMultipleTimes(val options: List<Int>) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер
@@ -45,4 +56,6 @@ sealed interface IncomingMessage {
     data class Bet(val amount: Long) : IncomingMessage
     @Serializable
     data class Check(val temp: String = "") : IncomingMessage
+    @Serializable
+    data class SelectRunCount(val times: Int) : IncomingMessage
 }

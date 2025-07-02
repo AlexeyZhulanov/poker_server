@@ -1,9 +1,11 @@
 package com.example.domain.logic
 
 import com.example.domain.model.*
+import com.example.dto.ws.BoardResult
 import com.example.dto.ws.OutgoingMessage
 import com.example.dto.ws.OutsInfo
 import com.example.services.GameRoomService
+import com.example.util.secureShuffle
 import com.example.util.sendSerialized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -26,6 +28,8 @@ class GameEngine(
     private var currentLevelIndex = 0
     private var blindIncreaseJob: Job? = null // Job для таймера повышения блайндов
     private var playersInGame: List<Player> = emptyList()
+    private var runItState = RunItState.NONE
+    private var runItOffer: RunItOffer? = null
 
     init {
         // Если это турнир, запускаем таймер
@@ -430,64 +434,156 @@ class GameEngine(
         val activePlayers = gameState.playerStates.filter { !it.hasFolded }
         val playersInAllIn = activePlayers.filter { it.isAllIn }
 
-        // Условие для шоудауна: как минимум два игрока не сбросили, и не более одного из них может еще действовать.
-        if (activePlayers.size >= 2 && (activePlayers.size - playersInAllIn.size) <= 1) {
-            // Запускаем поэтапный шоудаун в отдельной корутине
-            launch { executeStagedShowdown() }
-            return true // Сигнализируем, что начался all-in шоудаун
+        val isAllInSituation = activePlayers.size >= 2 && (activePlayers.size - playersInAllIn.size) <= 1
+
+        if (isAllInSituation && runItState == RunItState.NONE) {
+            launch {
+                val contenders = gameState.playerStates.filter { !it.hasFolded }
+                val contenderIds = contenders.map { it.player.userId }.toSet()
+
+                // Рассчитываем, сколько раз можно прокрутить доску
+                val usedCardsCount = contenders.sumOf { it.cards.size } + gameState.communityCards.size
+                val remainingDeckSize = 52 - usedCardsCount
+                val cardsNeededPerRun = 5 - gameState.communityCards.size
+                val maxRuns = if (cardsNeededPerRun > 0) remainingDeckSize / cardsNeededPerRun else 1
+
+                if (maxRuns > 1) {
+                    // Сохраняем состояние предложения
+                    runItOffer = RunItOffer(contenderIds, maxRuns)
+                    runItState = RunItState.AWAITING_PLAYER_CHOICES
+
+                    val options = (1..maxRuns).toList()
+                    val offerMessage = OutgoingMessage.OfferRunItMultipleTimes(options)
+
+                    // Рассылаем предложение ВСЕМ участникам all-in
+                    contenderIds.forEach { userId ->
+                        gameRoomService.sendToPlayer(room.roomId, userId, offerMessage)
+                    }
+                } else {
+                    // Если нельзя крутить несколько раз, сразу запускаем обычный шоудаун
+                    executeMultiRunShowdown(1)
+                }
+            }
+            return true
         }
         return false
     }
 
-    private suspend fun executeStagedShowdown() {
-        // Цикл работает, пока мы не дойдем до ривера
-        while (gameState.stage != GameStage.SHOWDOWN) {
-            // --- Расчет эквити и аутов для текущей стадии ---
-            val contenders = gameState.playerStates.filter { !it.hasFolded }
+    private suspend fun executeMultiRunShowdown(runCount: Int) {
+        calculateAndBroadcastEquity()
+        delay(3000L) // Пауза для игроков
 
-            val equityPlayersHands = contenders.map { it.cards }
-            val equityResult = calculateEquity(equityPlayersHands, gameState.communityCards)
-
-            val equitiesMap = contenders.mapIndexed { index, playerState ->
-                playerState.player.userId to equityResult.wins[index]
-            }.toMap()
-
-            // Находим игрока с лучшими шансами
-            val topEquityPlayerId = equitiesMap.maxByOrNull { it.value }?.key
-
-            // Считаем ауты для всех, кроме фаворита
-            val outsMap = mutableMapOf<String, OutsInfo>()
-            if (topEquityPlayerId != null) {
-                contenders.filter { it.player.userId != topEquityPlayerId }.forEach { underdog ->
-                    val opponentHands = contenders
-                        .filter { it.player.userId != underdog.player.userId }
-                        .map { it.cards }
-
-                    val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, gameState.communityCards)
-
-                    // Формируем правильный объект OutsInfo
-                    val outsInfo = when {
-                        directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
-                        hasIndirectOuts -> OutsInfo.RunnerRunner
-                        else -> OutsInfo.DrawingDead
-                    }
-                    outsMap[underdog.player.userId] = outsInfo
-                }
-            }
-
-            // Отправляем сообщение с эквити и аутами
-            val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap)
-            gameRoomService.broadcast(room.roomId, equityMessage)
-
-            // Пауза, чтобы игроки успели увидеть шансы
+        while (gameState.stage != GameStage.RIVER && gameState.stage != GameStage.SHOWDOWN) {
+            advanceToNextStage(isAllInShowdown = true) // Раздаем следующую улицу
+            calculateAndBroadcastEquity() // Пересчитываем и показываем новое эквити
             delay(3000L)
-
-            // Переходим к следующей стадии (раздаем флоп, терн или ривер)
-            advanceToNextStage(isAllInShowdown = true)
         }
 
-        // Когда цикл завершился (после ривера), просто распределяем банк
-        handleShowdown()
+        val contenders = gameState.playerStates.filter { !it.hasFolded }
+        val initialCommunityCards = gameState.communityCards
+        val usedCards = contenders.flatMap { it.cards } + initialCommunityCards
+
+        // 1. Создаем колоду из оставшихся карт и перемешиваем ее
+        val remainingDeck = CardDeck.buildFullDeck()
+            .filter { it !in usedCards }
+            .toMutableList()
+            .apply { secureShuffle() }
+
+        val cardsNeededPerRun = 5 - initialCommunityCards.size
+        val boardResults = mutableListOf<BoardResult>()
+        val potPerRun = gameState.pot / runCount // Делим банк поровну
+
+        // 2. Выполняем нужное количество прогонов
+        repeat(runCount) {
+            // 3. Раздаем карты для этой доски
+            val runCommunityCards = remainingDeck.take(cardsNeededPerRun)
+            // Удаляем розданные карты, чтобы они не использовались в следующем прогоне
+            repeat(cardsNeededPerRun) { remainingDeck.removeFirst() }
+
+            val fullBoard = initialCommunityCards + runCommunityCards
+
+            // 4. Оцениваем руки для этой конкретной доски
+            val hands = contenders.map { playerState ->
+                playerState.player.userId to HandEvaluator.evaluate(playerState.cards + fullBoard)
+            }
+            val bestHand = hands.maxByOrNull { it.second }?.second
+            val winnersForThisBoard = hands.filter { it.second == bestHand }.map { (userId, _) ->
+                gameState.playerStates.find { it.player.userId == userId }!!.player.username
+            }
+
+            // 5. Сохраняем результат для этой доски и распределяем часть банка
+            boardResults.add(BoardResult(fullBoard, winnersForThisBoard))
+            distributeWinnings(winnersForThisBoard.map { username -> contenders.find { it.player.username == username }!!.player.userId }, potPerRun)
+        }
+
+        // 6. Отправляем итоговый результат со всеми досками на клиент
+        val finalMessage = OutgoingMessage.RunItMultipleTimesResult(boardResults)
+        gameRoomService.broadcast(room.roomId, finalMessage)
+
+        // 7. Ждем и начинаем новую раздачу
+        delay(10000L) // Даем больше времени на просмотр
+        startNewHand()
+    }
+
+    fun processRunItSelection(userId: String, times: Int) {
+        val offer = runItOffer ?: return
+        // Проверяем, что мы в правильном состоянии и ответ пришел от участника раздачи
+        if (runItState != RunItState.AWAITING_PLAYER_CHOICES || userId !in offer.contenders) {
+            return
+        }
+        // Проверяем, что игрок еще не отвечал и его выбор корректен
+        if (offer.responses.containsKey(userId) || times !in 1..offer.maxRuns) {
+            return
+        }
+
+        offer.responses[userId] = times
+
+        // Проверяем, ответили ли все
+        if (offer.responses.size == offer.contenders.size) {
+            // Все ответили. Проверяем, все ли выбрали одно и то же число > 1
+            val firstChoice = offer.responses.values.first()
+            val allChoseSame = offer.responses.values.all { it == firstChoice }
+
+            val runCount = if (allChoseSame && firstChoice > 1) {
+                firstChoice
+            } else {
+                1 // Если есть разногласия или кто-то выбрал 1, крутим один раз
+            }
+
+            // Сбрасываем состояние и запускаем исполнение
+            runItState = RunItState.NONE
+            this.runItOffer = null
+            launch { executeMultiRunShowdown(runCount) }
+        }
+        // Если ответили еще не все, просто ждем
+    }
+
+    private suspend fun calculateAndBroadcastEquity() {
+        val contenders = gameState.playerStates.filter { !it.hasFolded }
+        if (contenders.size < 2) return
+
+        // Расчет эквити
+        val equityPlayersHands = contenders.map { it.cards }
+        val equityResult = calculateEquity(equityPlayersHands, gameState.communityCards)
+        val equitiesMap = contenders.mapIndexed { index, ps -> ps.player.userId to equityResult.wins[index] }.toMap()
+
+        // Расчет аутов для андердогов
+        val topEquityPlayerId = equitiesMap.maxByOrNull { it.value }?.key
+        val outsMap = mutableMapOf<String, OutsInfo>()
+        if (topEquityPlayerId != null) {
+            contenders.filter { it.player.userId != topEquityPlayerId }.forEach { underdog ->
+                val opponentHands = contenders.filter { it.player.userId != underdog.player.userId }.map { it.cards }
+                val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, gameState.communityCards)
+                outsMap[underdog.player.userId] = when {
+                    directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
+                    hasIndirectOuts -> OutsInfo.RunnerRunner
+                    else -> OutsInfo.DrawingDead
+                }
+            }
+        }
+        // Отправка сообщения
+        val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap)
+        gameRoomService.broadcast(room.roomId, equityMessage)
     }
 
     fun getCurrentGameState(): GameState = gameState
