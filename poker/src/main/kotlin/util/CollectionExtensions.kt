@@ -1,4 +1,4 @@
-package com.example.model
+package com.example.util
 
 import java.security.SecureRandom
 

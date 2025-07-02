@@ -3,7 +3,7 @@ package com.example.domain.logic
 import com.example.domain.model.Card
 import com.example.domain.model.Rank
 import com.example.domain.model.Suit
-import com.example.model.secureShuffle
+import com.example.util.secureShuffle
 import java.util.*
 
 class CardDeck {
@@ -13,7 +13,7 @@ class CardDeck {
         newDeck()
     }
 
-    fun get(n: Int): List<Card> {
+    fun deal(n: Int): List<Card> {
         val list = mutableListOf<Card>()
         repeat(n) {
             list.add(cards.removeFirst())

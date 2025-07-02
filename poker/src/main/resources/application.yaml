@@ -5,6 +5,14 @@ ktor:
   deployment:
     port: 8080
 jwt:
-  domain: "https://jwt-provider-domain/"
-  audience: "jwt-audience"
-  realm: "ktor sample app"
+  secret: "oasfAS*FOIASUYHFiuwaSRFDLajS124klajswfgfn<ZMqC>Dhfgg17264asDGHKASJD6aSF7A^STFsAHMFJg"
+  issuer: "http://0.0.0.0:8080"
+  audience: "poker-app-users"
+  realm: "Poker Application"
+  accessTokenExpiresIn: 3600000 # 1 час
+  refreshTokenExpiresIn: 604800000 # 7 дней
+db:
+  url: "jdbc:postgresql://localhost:5432/poker_db"
+  driver: "org.postgresql.Driver"
+  user: "alex"
+  password: "45839761"
