@@ -23,7 +23,7 @@ class GameRoomService {
             roomId = roomId,
             name = name,
             gameMode = mode,
-            players = listOf(owner),
+            players = listOf(),
             ownerId = owner.userId
         )
         rooms[roomId] = room
@@ -51,6 +51,7 @@ class GameRoomService {
 
         val updatedRoom = room.copy(players = room.players + player)
         rooms[roomId] = updatedRoom
+        engines[roomId]?.handlePlayerConnect(player)
 
         return updatedRoom
     }
@@ -63,6 +64,7 @@ class GameRoomService {
     fun onLeave(roomId: String, userId: String) {
         val roomMembers = members[roomId]
         roomMembers?.remove(userId)
+        engines[roomId]?.handlePlayerDisconnect(userId)
 
         // Если в комнате не осталось активных сессий, можно ее удалить
         if (roomMembers.isNullOrEmpty()) {

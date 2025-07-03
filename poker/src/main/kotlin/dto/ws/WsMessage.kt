@@ -79,6 +79,9 @@ sealed interface IncomingMessage {
     @SerialName("in.check")
     data class Check(val temp: String = "") : IncomingMessage
     @Serializable
+    @SerialName("in.call")
+    data class Call(val temp: String = "") : IncomingMessage
+    @Serializable
     @SerialName("in.run_count")
     data class SelectRunCount(val times: Int) : IncomingMessage
     @Serializable

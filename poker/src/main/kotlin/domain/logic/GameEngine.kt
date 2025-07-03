@@ -35,6 +35,24 @@ class GameEngine(
         }
     }
 
+    fun getCountPlayers(): Int {
+        return room.players.size
+    }
+
+    fun handlePlayerConnect(newPlayer: Player) {
+        room.players = room.players + newPlayer
+    }
+
+    fun handlePlayerDisconnect(userId: String) {
+        // Если игрок был в раздаче, просто считаем, что он сделал фолд
+        val playerState = getPlayerState(userId)
+        if (playerState != null && !playerState.hasFolded) {
+            processFold(userId)
+        }
+        val player = room.players.first { it.userId == userId }
+        room.players = room.players - player
+    }
+
     private fun startBlindTimer(durationMinutes: Int) {
         blindIncreaseJob = launch {
             while (isActive) {
@@ -58,7 +76,7 @@ class GameEngine(
 
     fun startNewHand() {
         // 1. Определяем игроков для новой раздачи (у кого есть стек)
-        this.playersInGame = if (gameState.playerStates.isEmpty()) {
+        playersInGame = if (gameState.playerStates.isEmpty()) {
             // Первая раздача, берем всех из комнаты
             room.players
         } else {
@@ -96,70 +114,78 @@ class GameEngine(
 
         // 4. Двигаем дилера и блайнды
         currentDealerPosition = (currentDealerPosition + 1) % playersInGame.size
-        val smallBlindPos = (currentDealerPosition + 1) % playersInGame.size
-        val bigBlindPos = (currentDealerPosition + 2) % playersInGame.size
-        // Действие начинает игрок после большого блайнда
+        val sbPos = (currentDealerPosition + 1) % playersInGame.size
+        val bbPos = (currentDealerPosition + 2) % playersInGame.size
         val actionPos = (currentDealerPosition + 3) % playersInGame.size
 
         // 5. Создаем начальное состояние игроков
         val initialPlayerStates = playersInGame.mapIndexed { index, player ->
+            val sbPost = if (index == sbPos) minOf(player.stack, smallBlindAmount) else 0L
+            val bbPost = if (index == bbPos) minOf(player.stack, bigBlindAmount) else 0L
+            val totalBet = sbPost + bbPost
             PlayerState(
-                player = player,
-                cards = deck.deal(2), // Раздаем 2 карты каждому
-                currentBet = when (index) {
-                    smallBlindPos -> smallBlindAmount
-                    bigBlindPos -> bigBlindAmount
-                    else -> 0L
-                },
-                handContribution = 0
+                player = player.copy(stack = player.stack - totalBet),
+                cards = deck.deal(2),
+                currentBet = totalBet,
+                handContribution = totalBet,
+                hasActedThisRound = false,
+                isAllIn = player.stack - totalBet <= 0
             )
         }
 
-        // 4. Формируем начальное состояние игры
+        // 6. Формируем начальное состояние игры
         gameState = GameState(
             roomId = room.roomId,
             stage = GameStage.PRE_FLOP,
             playerStates = initialPlayerStates,
             dealerPosition = currentDealerPosition,
             activePlayerPosition = actionPos,
-            pot = bigBlindAmount + smallBlindAmount, // Сумма блайндов
-            lastRaiseAmount = bigBlindAmount // Последняя ставка равна большому блайнду
+            pot = initialPlayerStates.sumOf { it.currentBet },
+            amountToCall = bigBlindAmount,
+            lastRaiseAmount = bigBlindAmount,
+            lastAggressorPosition = bbPos
         )
-
-        // 5. Рассылаем всем обновленное состояние
-        launch {
-            broadcastGameState()
-        }
+        // 7. Рассылаем всем обновленное состояние
+        launch { broadcastGameState() }
     }
 
     //--- Обработка действий игрока ---
 
     fun processFold(userId: String) {
-        updatePlayerState(userId) { it.copy(hasFolded = true) }
-        if (!checkForAllInShowdown()) {
-            advanceToNextPlayer()
-        }
+        updatePlayerState(userId) { it.copy(hasFolded = true, hasActedThisRound = true) }
+        findNextPlayerOrEndRound()
     }
 
     fun processCheck(userId: String) {
-        val playerState = gameState.playerStates.find { it.player.userId == userId } ?: return
-        val maxBetOnStreet = gameState.playerStates.maxOfOrNull { it.currentBet } ?: 0
-
-        if (playerState.currentBet != maxBetOnStreet) {
-            // Отправляем сообщение об ошибке конкретному игроку
-            launch {
-                val errorMessage = OutgoingMessage.ErrorMessage("Cannot check, you need to call or raise.")
-                gameRoomService.sendToPlayer(room.roomId, userId, errorMessage)
-            }
+        val playerState = getPlayerState(userId) ?: return
+        if (playerState.currentBet < gameState.amountToCall) {
+            launch { gameRoomService.sendToPlayer(room.roomId, userId, OutgoingMessage.ErrorMessage("Cannot check")) }
             return
         }
-        if (!checkForAllInShowdown()) {
-            advanceToNextPlayer()
+        updatePlayerState(userId) { it.copy(hasActedThisRound = true) }
+        findNextPlayerOrEndRound()
+    }
+
+    fun processCall(userId: String) {
+        val playerState = getPlayerState(userId) ?: return
+        val amountToCall = minOf(playerState.player.stack, gameState.amountToCall - playerState.currentBet)
+
+        val newStack = playerState.player.stack - amountToCall
+        updatePlayerState(userId) {
+            it.copy(
+                player = it.player.copy(stack = newStack),
+                currentBet = it.currentBet + amountToCall,
+                handContribution = it.handContribution + amountToCall,
+                hasActedThisRound = true,
+                isAllIn = newStack <= 0
+            )
         }
+        gameState = gameState.copy(pot = gameState.pot + amountToCall)
+        findNextPlayerOrEndRound()
     }
 
     fun processBet(userId: String, amount: Long) {
-        val playerState = gameState.playerStates.find { it.player.userId == userId } ?: return
+        val playerState = getPlayerState(userId) ?: return
         // Проверка, достаточно ли фишек у игрока
         if (amount > playerState.player.stack) {
             println("Action validation failed: Bet amount ($amount) is larger than stack (${playerState.player.stack}).")
@@ -182,21 +208,26 @@ class GameEngine(
             return
         }
 
-        val totalBet = playerState.currentBet + amount
+        // Это повышение, поэтому сбрасываем флаги "уже ходил" у всех остальных
+        clearHasActedFlags(exceptForUserId = userId)
+
+        val contribution = amount - playerState.currentBet
+        val newStack = playerState.player.stack - contribution
         updatePlayerState(userId) {
             it.copy(
-                player = it.player.copy(stack = it.player.stack - amount), // Уменьшаем стек
-                currentBet = it.currentBet + amount, // Увеличиваем ставку в текущем раунде
-                handContribution = it.handContribution + amount
+                player = it.player.copy(stack = newStack),
+                currentBet = amount,
+                handContribution = it.handContribution + contribution,
+                hasActedThisRound = true,
+                isAllIn = newStack <= 0
             )
         }
+
         gameState = gameState.copy(
-            pot = gameState.pot + amount,
-            lastRaiseAmount = if (totalBet > gameState.lastRaiseAmount) totalBet - gameState.lastRaiseAmount else gameState.lastRaiseAmount
+            pot = gameState.pot + contribution,
+            amountToCall = amount
         )
-        if (!checkForAllInShowdown()) {
-            advanceToNextPlayer()
-        }
+        findNextPlayerOrEndRound()
     }
 
     private fun updatePlayerState(userId: String, transform: (PlayerState) -> PlayerState) {
@@ -217,42 +248,75 @@ class GameEngine(
         )
     }
 
-    private fun advanceToNextPlayer() {
-        if (roundIsOver) return
+    private fun findNextPlayerOrEndRound() {
+        if (checkForAllInShowdown()) return
 
-        val activePlayers = gameState.playerStates.filter { !it.hasFolded && !it.isAllIn }
+        val activePlayers = gameState.playerStates.filter { !it.hasFolded }
         if (activePlayers.size <= 1) {
-            // Если остался один активный игрок, раунд (и игра) заканчивается
             handleShowdown()
             return
         }
 
-        val startPos = gameState.activePlayerPosition
-        var nextPos = (startPos + 1) % playersInGame.size
+        // Игроки, которые еще могут делать ставки (не all-in и не fold)
+        val playersWhoCanAct = activePlayers.filter { !it.isAllIn }
 
-        // Ищем следующего активного игрока
+        // 1. Проверяем, все ли уже походили
+        val allHaveActed = playersWhoCanAct.all { it.hasActedThisRound }
+        if (!allHaveActed) {
+            // Если не все походили, просто ищем следующего
+            advanceToNextActivePlayer()
+            return
+        }
+
+        // 2. Все походили. Теперь проверяем, все ли ставки равны.
+        val maxBet = activePlayers.maxOf { it.currentBet }
+        val allBetsEqual = playersWhoCanAct.all { it.currentBet == maxBet }
+
+        if (allBetsEqual) {
+            // Если все ставки равны, раунд окончен.
+            advanceToNextStage()
+        } else {
+            // Ставки не равны, значит, кто-то должен еще действовать.
+            // Сбрасываем флаги для тех, кто не поставил максимальную ставку.
+            clearHasActedFlags(keepForThoseWhoBet = maxBet)
+            advanceToNextActivePlayer()
+        }
+    }
+
+    private fun advanceToNextActivePlayer() {
+        var nextPos = (gameState.activePlayerPosition + 1) % playersInGame.size
         while (gameState.playerStates[nextPos].hasFolded || gameState.playerStates[nextPos].isAllIn) {
             nextPos = (nextPos + 1) % playersInGame.size
         }
+        gameState = gameState.copy(activePlayerPosition = nextPos)
+        launch { broadcastGameState() }
+    }
 
-        // Проверяем, закончился ли круг торгов
-        val allBetsEqual = activePlayers.map { it.currentBet }.distinct().size == 1
-        val actionReturnedToLastAggressor = nextPos == activePlayers.find { it.currentBet >= gameState.lastRaiseAmount }?.let { gameState.playerStates.indexOf(it) }
-
-        if (allBetsEqual && actionReturnedToLastAggressor) {
-            roundIsOver = true
-            advanceToNextStage()
-        } else {
-            gameState = gameState.copy(activePlayerPosition = nextPos)
-            launch { broadcastGameState() }
-        }
+    private fun clearHasActedFlags(exceptForUserId: String? = null, keepForThoseWhoBet: Long? = null) {
+        gameState = gameState.copy(
+            playerStates = gameState.playerStates.map { ps ->
+                // Сбрасываем флаг, если...
+                val shouldReset = when {
+                    ps.player.userId == exceptForUserId -> false // не сбрасывать для того, кто только что сходил
+                    keepForThoseWhoBet != null && ps.currentBet == keepForThoseWhoBet -> false // не сбрасывать для тех, кто уже уравнял
+                    else -> true
+                }
+                if (shouldReset) ps.copy(hasActedThisRound = false) else ps
+            }
+        )
     }
 
     private fun advanceToNextStage(isAllInShowdown: Boolean = false) {
         // 1. Сначала сбрасываем ставки игроков с прошлого раунда, если это не all-in шоудаун
         if (!isAllInShowdown) {
-            val newPlayerStates = gameState.playerStates.map { it.copy(currentBet = 0) }
-            gameState = gameState.copy(playerStates = newPlayerStates, lastRaiseAmount = 0)
+            val newPlayerStates = gameState.playerStates.map { it.copy(currentBet = 0, hasActedThisRound = false) }
+            val nextAggressor = if (gameState.stage == GameStage.PRE_FLOP) null else gameState.lastAggressorPosition
+            gameState = gameState.copy(
+                playerStates = newPlayerStates,
+                amountToCall = 0,
+                lastRaiseAmount = 0,
+                lastAggressorPosition = nextAggressor
+            )
             roundIsOver = false
         }
 
@@ -294,13 +358,11 @@ class GameEngine(
         }
 
         // 4. Эта логика выполняется только для обычных раундов торгов
-        var firstToAct = (gameState.dealerPosition + 1) % playersInGame.size
-        while (gameState.playerStates[firstToAct].hasFolded || gameState.playerStates[firstToAct].isAllIn) {
-            firstToAct = (firstToAct + 1) % playersInGame.size
-        }
-        gameState = gameState.copy(activePlayerPosition = firstToAct)
+        advanceToNextActivePlayer()
+    }
 
-        launch { broadcastGameState() }
+    private fun getPlayerState(userId: String): PlayerState? {
+        return gameState.playerStates.find { it.player.userId == userId }
     }
 
     private fun handleShowdown() {
