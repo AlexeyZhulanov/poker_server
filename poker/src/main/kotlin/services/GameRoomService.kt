@@ -5,8 +5,9 @@ import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
 import com.example.dto.ws.OutgoingMessage
-import com.example.util.sendSerialized
+import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
+import kotlinx.serialization.json.Json
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -73,12 +74,17 @@ class GameRoomService {
 
     suspend fun broadcast(roomId: String, message: OutgoingMessage) {
         members[roomId]?.values?.forEach { session ->
-            session.sendSerialized(message)
+            val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+            session.send(Frame.Text(jsonString))
         }
     }
 
     suspend fun sendToPlayer(roomId: String, userId: String, message: OutgoingMessage) {
-        members[roomId]?.get(userId)?.sendSerialized(message)
+        val session = members[roomId]?.get(userId)
+        if (session != null) {
+            val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+            session.send(Frame.Text(jsonString))
+        }
     }
 
     fun getEngine(roomId: String): GameEngine? = engines[roomId]

@@ -4,7 +4,6 @@ import com.example.domain.model.*
 import com.example.dto.ws.*
 import com.example.services.GameRoomService
 import com.example.util.secureShuffle
-import com.example.util.sendSerialized
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -409,22 +408,24 @@ class GameEngine(
     }
 
     private suspend fun broadcastGameState() {
-        // Получаем все сессии игроков в этой комнате
-        val currentMembers = gameRoomService.getMembers(room.roomId) ?: return
-
-        // Для каждого игрока создаем и отправляем его персональную версию состояния
-        currentMembers.forEach { (userId, session) ->
+        // Для каждого игрока в текущей раздаче...
+        gameState.playerStates.forEach { playerState ->
+            // 1. Создаем его персональную версию состояния игры
             val personalizedState = gameState.copy(
-                playerStates = gameState.playerStates.map { playerState ->
-                    // Если это не текущий игрок И игра еще не на стадии вскрытия, скрываем его карты
-                    if (playerState.player.userId != userId && gameState.stage != GameStage.SHOWDOWN) {
-                        playerState.copy(cards = emptyList())
+                playerStates = gameState.playerStates.map { otherPlayerState ->
+                    // Скрываем карты всех, кроме него самого (если не вскрытие)
+                    if (otherPlayerState.player.userId != playerState.player.userId && gameState.stage != GameStage.SHOWDOWN) {
+                        otherPlayerState.copy(cards = emptyList())
                     } else {
-                        playerState
+                        otherPlayerState
                     }
                 }
             )
-            session.sendSerialized(OutgoingMessage.GameStateUpdate(personalizedState))
+            // 2. Создаем сообщение
+            val message = OutgoingMessage.GameStateUpdate(personalizedState)
+
+            // 3. Просим GameRoomService отправить это сообщение конкретному игроку
+            gameRoomService.sendToPlayer(room.roomId, playerState.player.userId, message)
         }
     }
 
