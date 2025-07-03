@@ -5,8 +5,9 @@ import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
 import com.example.dto.ws.OutgoingMessage
-import com.example.util.sendSerialized
+import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
+import kotlinx.serialization.json.Json
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -22,7 +23,7 @@ class GameRoomService {
             roomId = roomId,
             name = name,
             gameMode = mode,
-            players = listOf(owner),
+            players = listOf(),
             ownerId = owner.userId
         )
         rooms[roomId] = room
@@ -50,6 +51,7 @@ class GameRoomService {
 
         val updatedRoom = room.copy(players = room.players + player)
         rooms[roomId] = updatedRoom
+        engines[roomId]?.handlePlayerConnect(player)
 
         return updatedRoom
     }
@@ -62,6 +64,7 @@ class GameRoomService {
     fun onLeave(roomId: String, userId: String) {
         val roomMembers = members[roomId]
         roomMembers?.remove(userId)
+        engines[roomId]?.handlePlayerDisconnect(userId)
 
         // Если в комнате не осталось активных сессий, можно ее удалить
         if (roomMembers.isNullOrEmpty()) {
@@ -73,12 +76,17 @@ class GameRoomService {
 
     suspend fun broadcast(roomId: String, message: OutgoingMessage) {
         members[roomId]?.values?.forEach { session ->
-            session.sendSerialized(message)
+            val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+            session.send(Frame.Text(jsonString))
         }
     }
 
     suspend fun sendToPlayer(roomId: String, userId: String, message: OutgoingMessage) {
-        members[roomId]?.get(userId)?.sendSerialized(message)
+        val session = members[roomId]?.get(userId)
+        if (session != null) {
+            val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+            session.send(Frame.Text(jsonString))
+        }
     }
 
     fun getEngine(roomId: String): GameEngine? = engines[roomId]

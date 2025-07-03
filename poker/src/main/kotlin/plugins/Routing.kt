@@ -145,8 +145,12 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                     if (engine == null) {
                         call.respond(HttpStatusCode.InternalServerError, "Game engine not found")
                         return@post
+                    } else {
+                        if(engine.getCountPlayers() < 2) {
+                            call.respond(HttpStatusCode.InternalServerError, "Players < 2")
+                            return@post
+                        }
                     }
-
                     engine.startGame()
                     call.respond(HttpStatusCode.OK, "Game started")
                 }
