@@ -7,15 +7,24 @@ import com.example.domain.model.Player
 import com.example.dto.ws.OutgoingMessage
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-class GameRoomService {
+class GameRoomService : CoroutineScope {
+    // Создаем Job + Dispatcher. SupervisorJob нужен, чтобы ошибка
+    // в одной корутине (например, при рассылке) не отменила все остальные.
+    override val coroutineContext = SupervisorJob() + Dispatchers.IO
+
     // Используем ConcurrentHashMap для потокобезопасного хранения комнат
     private val rooms = ConcurrentHashMap<String, GameRoom>()
     private val members = ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>>()
     private val engines = ConcurrentHashMap<String, GameEngine>()
+    private val lobbySubscribers = ConcurrentHashMap<String, WebSocketSession>()
 
     fun createRoom(name: String, mode: GameMode, owner: Player): GameRoom {
         val roomId = UUID.randomUUID().toString()
@@ -29,11 +38,16 @@ class GameRoomService {
         rooms[roomId] = room
         // Сразу создаем движок для новой комнаты
         engines[roomId] = GameEngine(room, this)
+        launch { broadcastLobbyUpdate() } // Оповещаем лобби о новой комнате
         return room
     }
 
     fun getRoom(roomId: String): GameRoom? {
         return rooms[roomId]
+    }
+
+    fun getAllRooms(): List<GameRoom> {
+        return rooms.values.toList()
     }
 
     fun joinRoom(roomId: String, player: Player): GameRoom? {
@@ -49,6 +63,7 @@ class GameRoomService {
         rooms[roomId] = updatedRoom
         engines[roomId]?.handlePlayerConnect(player)
 
+        launch { broadcastLobbyUpdate() } // Оповещаем лобби об изменении состава комнаты
         return updatedRoom
     }
 
@@ -68,6 +83,7 @@ class GameRoomService {
             engines.remove(roomId)?.destroy()
             members.remove(roomId)
         }
+        launch { broadcastLobbyUpdate() } // Оповещаем лобби, что комната могла удалиться или состав изменился
     }
 
     suspend fun broadcast(roomId: String, message: OutgoingMessage) {
@@ -94,5 +110,33 @@ class GameRoomService {
             .take(limit)
     }
 
-    fun getMembers(roomId: String) = members[roomId]
+    fun onLobbyJoin(userId: String, session: WebSocketSession) {
+        lobbySubscribers[userId] = session
+    }
+
+    fun onLobbyLeave(userId: String) {
+        lobbySubscribers.remove(userId)
+    }
+
+    // Отправка обновления лобби одному пользователю (когда он только зашел)
+    suspend fun sendLobbyUpdateToOneUser(userId: String) {
+        val session = lobbySubscribers[userId]
+        if (session != null) {
+            val message = OutgoingMessage.LobbyUpdate(getAllRooms())
+            val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+            session.send(Frame.Text(jsonString))
+        }
+    }
+
+    // Рассылка обновления всем в лобби
+    private suspend fun broadcastLobbyUpdate() {
+        if (lobbySubscribers.isEmpty()) return // Нечего делать, если в лобби никого нет
+
+        val message = OutgoingMessage.LobbyUpdate(getAllRooms())
+        val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+
+        lobbySubscribers.values.forEach { session ->
+            session.send(Frame.Text(jsonString))
+        }
+    }
 }

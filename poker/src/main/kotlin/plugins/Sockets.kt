@@ -22,6 +22,23 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
     }
     routing {
         authenticate("auth-jwt") {
+            webSocket("/lobby") {
+                val principal = call.principal<JWTPrincipal>()!!
+                val userId = principal.payload.getClaim("userId").asString()
+
+                try {
+                    // Добавляем пользователя в список "слушающих" лобби
+                    gameRoomService.onLobbyJoin(userId, this)
+                    // Сразу отправляем ему текущий список комнат
+                    gameRoomService.sendLobbyUpdateToOneUser(userId)
+
+                    // Держим соединение открытым, чтобы слушать, пока юзер не отключится
+                    for (frame in incoming) { /* Ничего не делаем с входящими */ }
+                } finally {
+                    // Когда пользователь уходит с экрана лобби, он отключается
+                    gameRoomService.onLobbyLeave(userId)
+                }
+            }
             webSocket("/play/{roomId}") {
                 val principal = call.principal<JWTPrincipal>() ?: return@webSocket
                 val userId = principal.payload.getClaim("userId").asString()

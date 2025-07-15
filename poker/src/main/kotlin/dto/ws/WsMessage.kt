@@ -1,6 +1,7 @@
 package com.example.dto.ws
 
 import com.example.domain.model.Card
+import com.example.domain.model.GameRoom
 import com.example.domain.model.GameState
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -64,6 +65,9 @@ sealed interface OutgoingMessage {
         val fromPlayerId: String, // ID того, кто совершил действие
         val action: SocialAction // Само действие
     ) : OutgoingMessage
+    @Serializable
+    @SerialName("out.lobby_update")
+    data class LobbyUpdate(val rooms: List<GameRoom>) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер
