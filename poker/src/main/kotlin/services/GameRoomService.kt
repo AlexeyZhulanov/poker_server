@@ -1,9 +1,12 @@
 package com.example.services
 
+import com.example.data.predefined.BlindStructures
 import com.example.domain.logic.GameEngine
+import com.example.domain.model.BlindLevel
 import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
+import com.example.dto.CreateRoomRequest
 import com.example.dto.ws.OutgoingMessage
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
@@ -26,19 +29,34 @@ class GameRoomService : CoroutineScope {
     private val engines = ConcurrentHashMap<String, GameEngine>()
     private val lobbySubscribers = ConcurrentHashMap<String, WebSocketSession>()
 
-    fun createRoom(name: String, mode: GameMode, owner: Player): GameRoom {
+    fun createRoom(request: CreateRoomRequest, owner: Player): GameRoom {
         val roomId = UUID.randomUUID().toString()
+
+        // Определяем структуру блайндов в зависимости от режима
+        // todo сделать несколько разных структур
+        val blindStructure = if (request.gameMode == GameMode.TOURNAMENT) {
+            BlindStructures.standardTournament
+        } else {
+            null // Для кэш-игры структура не нужна
+        }
+
+        // Создаем комнату, используя данные из запроса
         val room = GameRoom(
             roomId = roomId,
-            name = name,
-            gameMode = mode,
-            players = listOf(),
-            ownerId = owner.userId
+            name = request.name,
+            gameMode = request.gameMode,
+            players = listOf(owner), // Владелец сразу становится первым игроком
+            maxPlayers = request.maxPlayers,
+            ownerId = owner.userId,
+            blindStructure = blindStructure,
+            levelDurationMinutes = request.levelDurationMinutes
         )
         rooms[roomId] = room
-        // Сразу создаем движок для новой комнаты
+
+        // Создаем движок, передавая ему полную информацию о комнате
         engines[roomId] = GameEngine(room, this)
-        launch { broadcastLobbyUpdate() } // Оповещаем лобби о новой комнате
+
+        launch { broadcastLobbyUpdate() }
         return room
     }
 

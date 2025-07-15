@@ -1,9 +1,9 @@
 package com.example.plugins
 
 import com.example.data.repository.UserRepository
-import com.example.domain.model.GameMode
 import com.example.domain.model.Player
 import com.example.dto.AuthResponse
+import com.example.dto.CreateRoomRequest
 import com.example.dto.LoginRequest
 import com.example.dto.RegisterRequest
 import com.example.dto.UserResponse
@@ -104,9 +104,17 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
 
                 // Создать новую комнату
                 post {
+                    val request = call.receive<CreateRoomRequest>() // Получаем DTO из тела запроса
                     val user = call.attributes[UserAttributeKey]
-                    val ownerAsPlayer = Player(userId = user.id.toString(), username = user.username, stack = 1000)
-                    val newRoom = gameRoomService.createRoom("New Room", GameMode.CASH, ownerAsPlayer)
+
+                    // Стек игрока берем из запроса
+                    val ownerAsPlayer = Player(
+                        userId = user.id.toString(),
+                        username = user.username,
+                        stack = request.initialStack
+                    )
+
+                    val newRoom = gameRoomService.createRoom(request, ownerAsPlayer)
                     call.respond(HttpStatusCode.Created, newRoom)
                 }
 
