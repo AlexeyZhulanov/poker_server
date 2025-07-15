@@ -36,10 +36,6 @@ class GameRoomService {
         return rooms[roomId]
     }
 
-    fun getAllRooms(): List<GameRoom> {
-        return rooms.values.toList()
-    }
-
     fun joinRoom(roomId: String, player: Player): GameRoom? {
         val room = rooms[roomId] ?: return null
         if (room.players.size >= room.maxPlayers) {
@@ -90,6 +86,13 @@ class GameRoomService {
     }
 
     fun getEngine(roomId: String): GameEngine? = engines[roomId]
+
+    fun getPaginatedRooms(page: Int, limit: Int): List<GameRoom> {
+        return rooms.values
+            .toList()
+            .drop((page - 1) * limit)
+            .take(limit)
+    }
 
     fun getMembers(roomId: String) = members[roomId]
 }

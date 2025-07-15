@@ -6,6 +6,7 @@ import com.example.domain.model.Player
 import com.example.dto.AuthResponse
 import com.example.dto.LoginRequest
 import com.example.dto.RegisterRequest
+import com.example.dto.UserResponse
 import com.example.dto.ws.OutgoingMessage
 import com.example.services.GameRoomService
 import com.example.services.TokenService
@@ -82,13 +83,23 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
             get("/me") {
                 // Получаем пользователя напрямую из атрибутов
                 val user = call.attributes[UserAttributeKey]
-                call.respondText("Hello, ${user.username}! Your balance is ${user.cashBalance}")
+                val userResponse = UserResponse(
+                    id = user.id.toString(),
+                    username = user.username,
+                    email = user.email,
+                    cashBalance = user.cashBalance.toDouble()
+                )
+                call.respond(HttpStatusCode.OK, userResponse)
             }
 
             route("/rooms") {
-                // Получить список всех комнат
+                // Получить список комнат с пагинацией
                 get {
-                    call.respond(gameRoomService.getAllRooms())
+                    val page = call.request.queryParameters["page"]?.toIntOrNull() ?: 1
+                    val limit = call.request.queryParameters["limit"]?.toIntOrNull() ?: 10
+
+                    val rooms = gameRoomService.getPaginatedRooms(page, limit)
+                    call.respond(HttpStatusCode.OK, rooms)
                 }
 
                 // Создать новую комнату
