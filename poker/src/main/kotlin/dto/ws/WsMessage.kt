@@ -43,7 +43,7 @@ sealed interface OutgoingMessage {
     data class ErrorMessage(val message: String) : OutgoingMessage
     @Serializable
     @SerialName("out.blinds_up")
-    data class BlindsUp(val smallBlind: Long, val bigBlind: Long, val level: Int) : OutgoingMessage
+    data class BlindsUp(val smallBlind: Long, val bigBlind: Long, val ante: Long, val level: Int) : OutgoingMessage
     @Serializable
     @SerialName("out.tournament_winner")
     data class TournamentWinner(val winnerUsername: String) : OutgoingMessage

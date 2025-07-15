@@ -12,14 +12,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class GameEngine(
-    private val room: GameRoom,
+    private val roomId: String,
     private val gameRoomService: GameRoomService
 ) : CoroutineScope {
     private val job = Job()
     override val coroutineContext = job + Dispatchers.Default
 
     private var deck = CardDeck()
-    private var gameState: GameState = GameState(roomId = room.roomId)
+    private var gameState: GameState = GameState(roomId = roomId)
     private var roundIsOver: Boolean = false
     private var currentDealerPosition = -1
     private var currentLevelIndex = 0
@@ -29,18 +29,13 @@ class GameEngine(
     private var runItOffer: RunItOffer? = null
 
     init {
+        val room = gameRoomService.getRoom(roomId)
         // Если это турнир, запускаем таймер
-        if (room.gameMode == GameMode.TOURNAMENT && room.levelDurationMinutes != null) {
-            startBlindTimer(room.levelDurationMinutes)
+        if(room != null) {
+            if (room.gameMode == GameMode.TOURNAMENT && room.blindStructureType != null) {
+                startBlindTimer(room.blindStructureType, room)
+            }
         }
-    }
-
-    fun getCountPlayers(): Int {
-        return room.players.size
-    }
-
-    fun handlePlayerConnect(newPlayer: Player) {
-        room.players = room.players + newPlayer
     }
 
     fun handlePlayerDisconnect(userId: String) {
@@ -49,11 +44,14 @@ class GameEngine(
         if (playerState != null && !playerState.hasFolded) {
             processFold(userId)
         }
-        val player = room.players.first { it.userId == userId }
-        room.players = room.players - player
     }
 
-    private fun startBlindTimer(durationMinutes: Int) {
+    private fun startBlindTimer(blindStructureType: BlindStructureType, room: GameRoom) {
+        val durationMinutes = when(blindStructureType) {
+            BlindStructureType.STANDARD -> 10
+            BlindStructureType.FAST -> 5
+            BlindStructureType.TURBO -> 3
+        }
         blindIncreaseJob = launch {
             while (isActive) {
                 delay(durationMinutes * 60 * 1000L)
@@ -63,7 +61,7 @@ class GameEngine(
                 val newLevel = room.blindStructure?.getOrNull(currentLevelIndex)
                 if (newLevel != null) {
                     // Создаем и рассылаем сообщение
-                    val message = OutgoingMessage.BlindsUp(newLevel.smallBlind, newLevel.bigBlind, newLevel.level)
+                    val message = OutgoingMessage.BlindsUp(newLevel.smallBlind, newLevel.bigBlind, newLevel.ante, newLevel.level)
                     gameRoomService.broadcast(room.roomId, message)
                 }
             }
@@ -75,6 +73,7 @@ class GameEngine(
     }
 
     fun startNewHand() {
+        val room = gameRoomService.getRoom(roomId) ?: return // Если комната уже не существует, выходим
         // 1. Определяем игроков для новой раздачи (у кого есть стек)
         playersInGame = if (gameState.playerStates.isEmpty()) {
             // Первая раздача, берем всех из комнаты
@@ -98,19 +97,17 @@ class GameEngine(
         // 3. Создаем новую колоду
         deck.newDeck()
         roundIsOver = false
-        val smallBlindAmount: Long
-        val bigBlindAmount: Long
 
-        // Получаем блайнды в зависимости от режима игры
-        if (room.gameMode == GameMode.TOURNAMENT && room.blindStructure != null) {
-            val currentLevel = room.blindStructure.getOrNull(currentLevelIndex) ?: room.blindStructure.last()
-            smallBlindAmount = currentLevel.smallBlind
-            bigBlindAmount = currentLevel.bigBlind
+        val currentLevel = if (room.gameMode == GameMode.TOURNAMENT && room.blindStructure != null) {
+            room.blindStructure.getOrNull(currentLevelIndex) ?: room.blindStructure.last()
         } else {
-            // Фиксированные блайнды для кэш-игры
-            smallBlindAmount = 10L
-            bigBlindAmount = 20L
+            // Для кэш-игры используем "нулевой" уровень с фиксированными блайндами
+            BlindLevel(level = 0, smallBlind = 10, bigBlind = 20)
         }
+
+        val smallBlindAmount = currentLevel.smallBlind
+        val bigBlindAmount = currentLevel.bigBlind
+        val anteAmount = currentLevel.ante
 
         // 4. Двигаем дилера и блайнды
         currentDealerPosition = (currentDealerPosition + 1) % playersInGame.size
@@ -118,18 +115,26 @@ class GameEngine(
         val bbPos = (currentDealerPosition + 2) % playersInGame.size
         val actionPos = (currentDealerPosition + 3) % playersInGame.size
 
-        // 5. Создаем начальное состояние игроков
+        var potFromBlindsAndAntes = 0L
+
+        // 5. Создаем начальное состояние игроков, собирая блайнды и анте
         val initialPlayerStates = playersInGame.mapIndexed { index, player ->
             val sbPost = if (index == sbPos) minOf(player.stack, smallBlindAmount) else 0L
             val bbPost = if (index == bbPos) minOf(player.stack, bigBlindAmount) else 0L
+            // Каждый игрок ставит анте (если оно есть)
+            val antePost = if (anteAmount > 0) minOf(player.stack - sbPost - bbPost, anteAmount) else 0L
+
             val totalBet = sbPost + bbPost
+            val totalContribution = totalBet + antePost
+            potFromBlindsAndAntes += totalContribution
+
             PlayerState(
-                player = player.copy(stack = player.stack - totalBet),
+                player = player.copy(stack = player.stack - totalContribution),
                 cards = deck.deal(2),
-                currentBet = totalBet,
-                handContribution = totalBet,
+                currentBet = totalBet, // Анте идет сразу в банк, не считается частью ставки
+                handContribution = totalContribution,
                 hasActedThisRound = false,
-                isAllIn = player.stack - totalBet <= 0
+                isAllIn = player.stack - totalContribution <= 0
             )
         }
 
@@ -140,7 +145,7 @@ class GameEngine(
             playerStates = initialPlayerStates,
             dealerPosition = currentDealerPosition,
             activePlayerPosition = actionPos,
-            pot = initialPlayerStates.sumOf { it.currentBet },
+            pot = potFromBlindsAndAntes,
             amountToCall = bigBlindAmount,
             lastRaiseAmount = bigBlindAmount,
             lastAggressorPosition = bbPos
@@ -159,7 +164,7 @@ class GameEngine(
     fun processCheck(userId: String) {
         val playerState = getPlayerState(userId) ?: return
         if (playerState.currentBet < gameState.amountToCall) {
-            launch { gameRoomService.sendToPlayer(room.roomId, userId, OutgoingMessage.ErrorMessage("Cannot check")) }
+            launch { gameRoomService.sendToPlayer(roomId, userId, OutgoingMessage.ErrorMessage("Cannot check")) }
             return
         }
         updatePlayerState(userId) { it.copy(hasActedThisRound = true) }
@@ -487,7 +492,7 @@ class GameEngine(
             val message = OutgoingMessage.GameStateUpdate(personalizedState)
 
             // 3. Просим GameRoomService отправить это сообщение конкретному игроку
-            gameRoomService.sendToPlayer(room.roomId, playerState.player.userId, message)
+            gameRoomService.sendToPlayer(roomId, playerState.player.userId, message)
         }
     }
 
@@ -518,7 +523,7 @@ class GameEngine(
 
                     // Рассылаем предложение ВСЕМ участникам all-in
                     contenderIds.forEach { userId ->
-                        gameRoomService.sendToPlayer(room.roomId, userId, offerMessage)
+                        gameRoomService.sendToPlayer(roomId, userId, offerMessage)
                     }
                 } else {
                     // Если нельзя крутить несколько раз, сразу запускаем обычный шоудаун
@@ -579,7 +584,7 @@ class GameEngine(
 
         // 6. Отправляем итоговый результат со всеми досками на клиент
         val finalMessage = OutgoingMessage.RunItMultipleTimesResult(boardResults)
-        gameRoomService.broadcast(room.roomId, finalMessage)
+        gameRoomService.broadcast(roomId, finalMessage)
 
         // 7. Ждем и начинаем новую раздачу
         delay(10000L) // Даем больше времени на просмотр
@@ -644,7 +649,7 @@ class GameEngine(
         }
         // Отправка сообщения
         val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap)
-        gameRoomService.broadcast(room.roomId, equityMessage)
+        gameRoomService.broadcast(roomId, equityMessage)
     }
 
     fun getCurrentGameState(): GameState = gameState
@@ -656,7 +661,7 @@ class GameEngine(
         )
         // Рассылаем всем в комнате
         launch {
-            gameRoomService.broadcast(room.roomId, broadcastMessage)
+            gameRoomService.broadcast(roomId, broadcastMessage)
         }
     }
 }

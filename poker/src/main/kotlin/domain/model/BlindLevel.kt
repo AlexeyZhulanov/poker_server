@@ -6,5 +6,6 @@ import kotlinx.serialization.Serializable
 data class BlindLevel(
     val level: Int,
     val smallBlind: Long,
-    val bigBlind: Long
+    val bigBlind: Long,
+    val ante: Long = 0L
 )

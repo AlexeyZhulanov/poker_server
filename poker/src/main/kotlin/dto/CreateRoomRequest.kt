@@ -1,5 +1,6 @@
 package com.example.dto
 
+import com.example.domain.model.BlindStructureType
 import com.example.domain.model.GameMode
 import kotlinx.serialization.Serializable
 
@@ -9,10 +10,8 @@ data class CreateRoomRequest(
     val gameMode: GameMode,
     val maxPlayers: Int,
     val initialStack: Long,
-    // Поля для кэш-игры
     val smallBlind: Long?,
     val bigBlind: Long?,
-    // Поля для турнира
-    val levelDurationMinutes: Int?
-    // todo Сюда же можно будет добавить структуру блайндов для турнира
+    val levelDurationMinutes: Int?,
+    val blindStructureType: BlindStructureType? = null
 )

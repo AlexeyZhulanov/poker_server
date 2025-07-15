@@ -2,7 +2,7 @@ package com.example.services
 
 import com.example.data.predefined.BlindStructures
 import com.example.domain.logic.GameEngine
-import com.example.domain.model.BlindLevel
+import com.example.domain.model.BlindStructureType
 import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
@@ -33,12 +33,14 @@ class GameRoomService : CoroutineScope {
         val roomId = UUID.randomUUID().toString()
 
         // Определяем структуру блайндов в зависимости от режима
-        // todo сделать несколько разных структур
         val blindStructure = if (request.gameMode == GameMode.TOURNAMENT) {
-            BlindStructures.standardTournament
-        } else {
-            null // Для кэш-игры структура не нужна
-        }
+            // Выбираем структуру на основе запроса
+            when (request.blindStructureType) {
+                BlindStructureType.FAST -> BlindStructures.fast
+                BlindStructureType.TURBO -> BlindStructures.turbo
+                else -> BlindStructures.standard // STANDARD будет по умолчанию
+            }
+        } else null
 
         // Создаем комнату, используя данные из запроса
         val room = GameRoom(
@@ -49,12 +51,12 @@ class GameRoomService : CoroutineScope {
             maxPlayers = request.maxPlayers,
             ownerId = owner.userId,
             blindStructure = blindStructure,
-            levelDurationMinutes = request.levelDurationMinutes
+            blindStructureType = request.blindStructureType
         )
         rooms[roomId] = room
 
         // Создаем движок, передавая ему полную информацию о комнате
-        engines[roomId] = GameEngine(room, this)
+        engines[roomId] = GameEngine(roomId, this)
 
         launch { broadcastLobbyUpdate() }
         return room
@@ -79,7 +81,6 @@ class GameRoomService : CoroutineScope {
 
         val updatedRoom = room.copy(players = room.players + player)
         rooms[roomId] = updatedRoom
-        engines[roomId]?.handlePlayerConnect(player)
 
         launch { broadcastLobbyUpdate() } // Оповещаем лобби об изменении состава комнаты
         return updatedRoom
