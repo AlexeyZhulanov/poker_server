@@ -12,6 +12,5 @@ data class CreateRoomRequest(
     val initialStack: Long,
     val smallBlind: Long?,
     val bigBlind: Long?,
-    val levelDurationMinutes: Int?,
     val blindStructureType: BlindStructureType? = null
 )

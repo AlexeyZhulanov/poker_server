@@ -1,5 +1,7 @@
 package com.example.plugins
 
+import com.auth0.jwt.JWT
+import com.auth0.jwt.algorithms.Algorithm
 import com.example.data.repository.UserRepository
 import com.example.domain.model.Player
 import com.example.dto.AuthResponse
@@ -16,10 +18,14 @@ import io.ktor.server.application.*
 import io.ktor.server.auth.authenticate
 import io.ktor.server.auth.jwt.JWTPrincipal
 import io.ktor.server.auth.principal
+import io.ktor.server.request.header
 import io.ktor.server.request.receive
+import io.ktor.server.request.receiveText
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.serialization.json.Json
 import org.mindrot.jbcrypt.BCrypt
+import java.util.UUID
 
 fun Application.configureRouting(gameRoomService: GameRoomService) {
     val userRepository = UserRepository()
@@ -77,6 +83,43 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
 
                 call.respond(HttpStatusCode.OK, AuthResponse(accessToken, refreshToken))
             }
+
+            post("/refresh") {
+                // 1. Получаем refresh-токен из заголовка Authorization
+                val refreshToken = call.request.header("Authorization")?.removePrefix("Bearer ")
+                if (refreshToken == null) {
+                    call.respond(HttpStatusCode.BadRequest, "Refresh token is missing")
+                    return@post
+                }
+
+                // 2. Создаем верификатор с теми же параметрами, что и при создании токена
+                val secret = environment.config.property("jwt.secret").getString()
+                val issuer = environment.config.property("jwt.issuer").getString()
+                val audience = environment.config.property("jwt.audience").getString()
+
+                val verifier = JWT.require(Algorithm.HMAC256(secret))
+                    .withAudience(audience)
+                    .withIssuer(issuer)
+                    .build()
+
+                try {
+                    // 3. Проверяем токен. Если он невалиден (подпись, срок действия), будет выброшено исключение.
+                    val decodedJWT = verifier.verify(refreshToken)
+
+                    // 4. Если токен валиден, извлекаем userId
+                    val userIdString = decodedJWT.getClaim("userId").asString()
+                    val userId = UUID.fromString(userIdString)
+
+                    // 5. Генерируем новую пару токенов
+                    val (newAccessToken, newRefreshToken) = tokenService.generateTokens(userId)
+
+                    call.respond(HttpStatusCode.OK, AuthResponse(newAccessToken, newRefreshToken))
+
+                } catch (e: Exception) {
+                    // 6. В случае ошибки (невалидный токен) отправляем 401 Unauthorized
+                    call.respond(HttpStatusCode.Unauthorized, "Invalid refresh token")
+                }
+            }
         }
 
         authenticate("auth-jwt") {
@@ -104,7 +147,10 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
 
                 // Создать новую комнату
                 post {
-                    val request = call.receive<CreateRoomRequest>() // Получаем DTO из тела запроса
+                    val rawJsonBody = call.receiveText()
+                    println("Received raw JSON for /rooms: $rawJsonBody")
+
+                    val request = Json.decodeFromString<CreateRoomRequest>(rawJsonBody) // Получаем DTO из тела запроса
                     val user = call.attributes[UserAttributeKey]
 
                     // Стек игрока берем из запроса
@@ -124,14 +170,15 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                     val roomId = call.parameters["roomId"]
                     if (roomId == null) {
                         call.respond(HttpStatusCode.BadRequest, "Room ID is missing")
+                        println("400 room id is missing")
                         return@post
                     }
                     val user = call.attributes[UserAttributeKey]
 
                     // 3. Создаем объект Player и пытаемся присоединиться к комнате
-                    val player = Player(userId = user.id.toString(), username = user.username, stack = 1000)
+                    val player = Player(userId = user.id.toString(), username = user.username, stack = 1000) // todo stack count
                     val updatedRoom = gameRoomService.joinRoom(roomId, player)
-
+                    println("updated room: $updatedRoom")
                     // 4. Отправляем ответ
                     if (updatedRoom == null) {
                         call.respond(HttpStatusCode.NotFound, "Room not found or is full")
@@ -160,16 +207,18 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                         return@post
                     }
 
+                    if (room.players.size < 2) {
+                        println("In room count players= ${room.players.size}")
+                        call.respond(HttpStatusCode.BadRequest, "Not enough players to start (minimum 2).")
+                        return@post
+                    }
+
                     val engine = gameRoomService.getEngine(roomId)
                     if (engine == null) {
                         call.respond(HttpStatusCode.InternalServerError, "Game engine not found")
                         return@post
-                    } else {
-                        if(engine.getCountPlayers() < 2) {
-                            call.respond(HttpStatusCode.InternalServerError, "Players < 2")
-                            return@post
-                        }
                     }
+
                     engine.startGame()
                     call.respond(HttpStatusCode.OK, "Game started")
                 }

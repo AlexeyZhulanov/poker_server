@@ -78,10 +78,10 @@ class GameRoomService : CoroutineScope {
         if (room.players.any { it.userId == player.userId }) {
             return room // Игрок уже в комнате
         }
-
+        println("rooms before: $rooms")
         val updatedRoom = room.copy(players = room.players + player)
         rooms[roomId] = updatedRoom
-
+        println("rooms after: $rooms")
         launch { broadcastLobbyUpdate() } // Оповещаем лобби об изменении состава комнаты
         return updatedRoom
     }

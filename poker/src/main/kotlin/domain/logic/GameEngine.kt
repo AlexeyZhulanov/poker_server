@@ -415,7 +415,7 @@ class GameEngine(
             gameState = gameState.copy(stage = GameStage.SHOWDOWN)
 
             broadcastGameState()
-            delay(8000L)
+            delay(3000L) // задержка перед следующей раздачей
 
             // Перед стартом новой руки очищаем результаты вскрытия
             gameState = gameState.copy(showdownResults = null)
@@ -587,7 +587,7 @@ class GameEngine(
         gameRoomService.broadcast(roomId, finalMessage)
 
         // 7. Ждем и начинаем новую раздачу
-        delay(10000L) // Даем больше времени на просмотр
+        delay(5000L) // Даем больше времени на просмотр
         startNewHand()
     }
 
