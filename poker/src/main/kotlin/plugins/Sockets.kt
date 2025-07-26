@@ -83,7 +83,7 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                 } finally {
                     // При отключении (или ошибке) удаляем сессию и оповещаем остальных
                     gameRoomService.onLeave(roomId, userId)
-                    val playerLeftMessage = OutgoingMessage.PlayerLeft(player.username)
+                    val playerLeftMessage = OutgoingMessage.PlayerLeft(player.userId)
                     gameRoomService.broadcast(roomId, playerLeftMessage)
                 }
             }

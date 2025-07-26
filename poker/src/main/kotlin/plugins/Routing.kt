@@ -193,7 +193,7 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                     if (updatedRoom == null) {
                         call.respond(HttpStatusCode.NotFound, "Room not found or is full")
                     } else {
-                        val playerJoinedMessage = OutgoingMessage.PlayerJoined(player.username)
+                        val playerJoinedMessage = OutgoingMessage.PlayerJoined(player)
                         gameRoomService.broadcast(roomId, playerJoinedMessage)
                         call.respond(HttpStatusCode.OK, updatedRoom)
                     }
