@@ -73,8 +73,9 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                             is IncomingMessage.Bet -> if(isActiveFlag) engine.processBet(userId, incomingMessage.amount)
                             is IncomingMessage.Check -> if(isActiveFlag) engine.processCheck(userId)
                             is IncomingMessage.Call -> if(isActiveFlag) engine.processCall(userId)
-                            is IncomingMessage.SelectRunCount -> if(isActiveFlag) engine.processRunItSelection(userId, incomingMessage.times)
-                            is IncomingMessage.PerformSocialAction -> if(isActiveFlag) engine.processSocialAction(userId, incomingMessage.action)
+                            is IncomingMessage.SelectRunCount -> engine?.processUnderdogRunChoice(userId, incomingMessage.times)
+                            is IncomingMessage.AgreeRunCount -> engine?.processFavoriteRunConfirmation(userId, incomingMessage.isAgree)
+                            is IncomingMessage.PerformSocialAction -> engine?.processSocialAction(userId, incomingMessage.action)
                             is IncomingMessage.SetReady -> gameRoomService.setPlayerReady(roomId, userId, incomingMessage.isReady)
                         }
                     }

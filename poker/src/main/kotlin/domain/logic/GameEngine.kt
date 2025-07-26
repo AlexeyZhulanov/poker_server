@@ -522,31 +522,28 @@ class GameEngine(
 
         if (isAllInSituation && runItState == RunItState.NONE) {
             launch {
-                val contenders = gameState.playerStates.filter { !it.hasFolded }
-                val contenderIds = contenders.map { it.player.userId }.toSet()
+                val room = gameRoomService.getRoom(roomId)
 
-                // Рассчитываем, сколько раз можно прокрутить доску
-                val usedCardsCount = contenders.sumOf { it.cards.size } + gameState.communityCards.size
-                val remainingDeckSize = 52 - usedCardsCount
-                val cardsNeededPerRun = 5 - gameState.communityCards.size
-                val maxRuns = if (cardsNeededPerRun > 0) remainingDeckSize / cardsNeededPerRun else 1
-
-                if (maxRuns > 1) {
-                    // Сохраняем состояние предложения
-                    runItOffer = RunItOffer(contenderIds, maxRuns)
-                    runItState = RunItState.AWAITING_PLAYER_CHOICES
-
-                    val options = (1..maxRuns).toList()
-                    val offerMessage = OutgoingMessage.OfferRunItMultipleTimes(options)
-
-                    // Рассылаем предложение ВСЕМ участникам all-in
-                    contenderIds.forEach { userId ->
-                        gameRoomService.sendToPlayer(roomId, userId, offerMessage)
-                    }
-                } else {
-                    // Если нельзя крутить несколько раз, сразу запускаем обычный шоудаун
-                    executeMultiRunShowdown(1)
+                if (room?.gameMode != GameMode.CASH) {
+                    // Если турнир, то крутим один раз
+                    executeMultiRunShowdown(1); return@launch
                 }
+
+                val underdog = playersInAllIn.minByOrNull { it.handContribution }
+                if (underdog == null) {
+                    // Если по какой-то причине не нашли (хотя не должны), просто крутим один раз
+                    executeMultiRunShowdown(1); return@launch
+                }
+                val underdogId = underdog.player.userId
+                val contenderIds = activePlayers.map { it.player.userId }.toSet()
+                val favoriteIds = contenderIds - underdogId
+
+                // Сохраняем состояние предложения
+                runItOffer = RunItOffer(underdogId, favoriteIds.toSet())
+                runItState = RunItState.AWAITING_UNDERDOG_CHOICE
+
+                // Отсылаем предложение андердогу
+                gameRoomService.sendToPlayer(roomId, underdogId, OutgoingMessage.OfferRunItForUnderdog)
             }
             return true
         }
@@ -609,37 +606,44 @@ class GameEngine(
         startNewHand()
     }
 
-    fun processRunItSelection(userId: String, times: Int) {
+    fun processUnderdogRunChoice(userId: String, times: Int) {
         val offer = runItOffer ?: return
-        // Проверяем, что мы в правильном состоянии и ответ пришел от участника раздачи
-        if (runItState != RunItState.AWAITING_PLAYER_CHOICES || userId !in offer.contenders) {
-            return
-        }
-        // Проверяем, что игрок еще не отвечал и его выбор корректен
-        if (offer.responses.containsKey(userId) || times !in 1..offer.maxRuns) {
-            return
-        }
+        if (runItState != RunItState.AWAITING_UNDERDOG_CHOICE || userId != offer.underdogId) return
 
-        offer.responses[userId] = times
+        if (times > 1) {
+            offer.chosenRuns = times
+            runItState = RunItState.AWAITING_FAVORITE_CONFIRMATION
 
-        // Проверяем, ответили ли все
-        if (offer.responses.size == offer.contenders.size) {
-            // Все ответили. Проверяем, все ли выбрали одно и то же число > 1
-            val firstChoice = offer.responses.values.first()
-            val allChoseSame = offer.responses.values.all { it == firstChoice }
-
-            val runCount = if (allChoseSame && firstChoice > 1) {
-                firstChoice
-            } else {
-                1 // Если есть разногласия или кто-то выбрал 1, крутим один раз
+            // Отправляем запрос на подтверждение всем остальным
+            val confirmationRequest = OutgoingMessage.OfferRunItMultipleTimes(offer.underdogId, times)
+            launch {
+                offer.favoriteIds.forEach { favoriteId ->
+                    gameRoomService.sendToPlayer(roomId, favoriteId, confirmationRequest)
+                }
             }
-
-            // Сбрасываем состояние и запускаем исполнение
+        } else {
+            // Андердог выбрал 1 раз, сразу запускаем
             runItState = RunItState.NONE
-            this.runItOffer = null
-            launch { executeMultiRunShowdown(runCount) }
+            runItOffer = null
+            launch { executeMultiRunShowdown(1) }
         }
-        // Если ответили еще не все, просто ждем
+    }
+
+    fun processFavoriteRunConfirmation(userId: String, accepted: Boolean) {
+        val offer = runItOffer ?: return
+        if (runItState != RunItState.AWAITING_FAVORITE_CONFIRMATION || userId !in offer.favoriteIds) return
+
+        offer.favoriteResponses[userId] = accepted
+
+        // Если все фавориты ответили
+        if (offer.favoriteResponses.keys == offer.favoriteIds) {
+            val allAccepted = offer.favoriteResponses.values.all { it }
+            val finalRunCount = if (allAccepted) offer.chosenRuns else 1
+
+            runItState = RunItState.NONE
+            runItOffer = null
+            launch { executeMultiRunShowdown(finalRunCount) }
+        }
     }
 
     private suspend fun calculateAndBroadcastEquity() {

@@ -59,7 +59,10 @@ sealed interface OutgoingMessage {
     data class RunItMultipleTimesResult(val results: List<BoardResult>) : OutgoingMessage
     @Serializable
     @SerialName("out.run_multiple_offer")
-    data class OfferRunItMultipleTimes(val options: List<Int>) : OutgoingMessage
+    data class OfferRunItMultipleTimes(val underdogId: String, val times: Int) : OutgoingMessage
+    @Serializable
+    @SerialName("out.run_offer_underdog")
+    data object OfferRunItForUnderdog : OutgoingMessage
     @Serializable
     @SerialName("out.social_action_broadcast")
     data class SocialActionBroadcast(
@@ -92,6 +95,9 @@ sealed interface IncomingMessage {
     @Serializable
     @SerialName("in.run_count")
     data class SelectRunCount(val times: Int) : IncomingMessage
+    @Serializable
+    @SerialName("in.agree_run_count")
+    data class AgreeRunCount(val isAgree: Boolean) : IncomingMessage
     @Serializable
     @SerialName("in.social_action")
     data class PerformSocialAction(val action: SocialAction) : IncomingMessage
