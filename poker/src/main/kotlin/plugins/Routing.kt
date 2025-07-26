@@ -164,6 +164,16 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                     call.respond(HttpStatusCode.Created, newRoom)
                 }
 
+                get("/{roomId}") {
+                    val roomId = call.parameters["roomId"] ?: return@get call.respond(HttpStatusCode.BadRequest)
+                    val room = gameRoomService.getRoom(roomId)
+                    if (room != null) {
+                        call.respond(HttpStatusCode.OK, room)
+                    } else {
+                        call.respond(HttpStatusCode.NotFound)
+                    }
+                }
+
                 // Присоединиться к комнате
                 post("/{roomId}/join") {
                     // 1. Получаем ID комнаты из URL и ID пользователя из токена
@@ -187,40 +197,6 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                         gameRoomService.broadcast(roomId, playerJoinedMessage)
                         call.respond(HttpStatusCode.OK, updatedRoom)
                     }
-                }
-
-                // Запустить игру в комнате
-                post("/{roomId}/start") {
-                    val roomId = call.parameters["roomId"] ?: return@post call.respond(HttpStatusCode.BadRequest)
-
-                    val principal = call.principal<JWTPrincipal>() ?: return@post
-                    val userId = principal.payload.getClaim("userId").asString()
-
-                    val room = gameRoomService.getRoom(roomId)
-                    if (room == null) {
-                        call.respond(HttpStatusCode.NotFound, "Room not found")
-                        return@post
-                    }
-
-                    if (room.ownerId != userId) {
-                        call.respond(HttpStatusCode.Forbidden, "Only the room owner can start the game.")
-                        return@post
-                    }
-
-                    if (room.players.size < 2) {
-                        println("In room count players= ${room.players.size}")
-                        call.respond(HttpStatusCode.BadRequest, "Not enough players to start (minimum 2).")
-                        return@post
-                    }
-
-                    val engine = gameRoomService.getEngine(roomId)
-                    if (engine == null) {
-                        call.respond(HttpStatusCode.InternalServerError, "Game engine not found")
-                        return@post
-                    }
-
-                    engine.startGame()
-                    call.respond(HttpStatusCode.OK, "Game started")
                 }
             }
         }

@@ -94,6 +94,12 @@ class GameRoomService : CoroutineScope {
     fun onLeave(roomId: String, userId: String) {
         val roomMembers = members[roomId]
         roomMembers?.remove(userId)
+
+        val room = rooms[roomId] ?: return
+        val players = room.players.toMutableList()
+        val updatedRoom = room.copy(players = players.filterNot { it.userId == userId })
+        rooms[roomId] = updatedRoom
+
         engines[roomId]?.handlePlayerDisconnect(userId)
 
         // Если в комнате не осталось активных сессий, можно ее удалить
@@ -104,6 +110,32 @@ class GameRoomService : CoroutineScope {
         }
         launch { broadcastLobbyUpdate() } // Оповещаем лобби, что комната могла удалиться или состав изменился
     }
+
+    fun setAllPlayersUnready(roomId: String) {
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map { it.copy(isReady = false) }
+        val updatedRoom = room.copy(players = updatedPlayers)
+        rooms[roomId] = updatedRoom
+    }
+
+    suspend fun setPlayerReady(roomId: String, userId: String, isReady: Boolean) {
+        println("User $userId is Ready: $isReady")
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map { if (it.userId == userId) it.copy(isReady = isReady) else it }
+        val updatedRoom = room.copy(players = updatedPlayers)
+        rooms[roomId] = updatedRoom
+
+        // Оповещаем всех об изменении статуса
+        broadcast(roomId, OutgoingMessage.PlayerReadyUpdate(userId, isReady))
+
+        // Проверяем, не пора ли начинать игру
+        val activePlayers = updatedRoom.players
+        if (activePlayers.size >= 2 && activePlayers.all { it.isReady }) {
+            engines[roomId]?.startGame()
+        }
+    }
+
+
 
     suspend fun broadcast(roomId: String, message: OutgoingMessage) {
         members[roomId]?.values?.forEach { session ->

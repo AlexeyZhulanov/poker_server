@@ -10,7 +10,7 @@ jwt:
   audience: "poker-app-users"
   realm: "Poker Application"
   accessTokenExpiresIn: 3600000 # 1 час
-  refreshTokenExpiresIn: 604800000 # 7 дней
+  refreshTokenExpiresIn: 2592000000 # 30 дней
 db:
   url: "jdbc:postgresql://localhost:5432/poker_db"
   driver: "org.postgresql.Driver"

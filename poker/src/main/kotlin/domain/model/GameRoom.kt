@@ -11,5 +11,6 @@ data class GameRoom(
     val maxPlayers: Int = 9,
     val ownerId: String,
     val blindStructureType: BlindStructureType? = null,
-    val blindStructure: List<BlindLevel>? = null
+    val blindStructure: List<BlindLevel>? = null,
+    val gameStarted: Boolean = false
 )

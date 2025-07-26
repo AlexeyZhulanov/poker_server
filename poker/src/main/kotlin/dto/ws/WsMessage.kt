@@ -31,7 +31,7 @@ data class BoardResult(
 sealed interface OutgoingMessage {
     @Serializable
     @SerialName("out.game_state")
-    data class GameStateUpdate(val state: GameState) : OutgoingMessage
+    data class GameStateUpdate(val state: GameState?) : OutgoingMessage
     @Serializable
     @SerialName("out.player_joined")
     data class PlayerJoined(val username: String) : OutgoingMessage
@@ -68,6 +68,9 @@ sealed interface OutgoingMessage {
     @Serializable
     @SerialName("out.lobby_update")
     data class LobbyUpdate(val rooms: List<GameRoom>) : OutgoingMessage
+    @Serializable
+    @SerialName("out.player_ready_update")
+    data class PlayerReadyUpdate(val userId: String, val isReady: Boolean) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер
@@ -91,4 +94,7 @@ sealed interface IncomingMessage {
     @Serializable
     @SerialName("in.social_action")
     data class PerformSocialAction(val action: SocialAction) : IncomingMessage
+    @Serializable
+    @SerialName("in.set_ready")
+    data class SetReady(val isReady: Boolean) : IncomingMessage
 }

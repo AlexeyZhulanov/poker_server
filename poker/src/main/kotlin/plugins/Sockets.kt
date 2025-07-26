@@ -55,34 +55,27 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                     // Добавляем сессию в менеджер
                     gameRoomService.onJoin(roomId, userId, this)
 
-                    // Оповещаем всех, что игрок присоединился
-                    val playerJoinedMessage = OutgoingMessage.PlayerJoined(player.username)
-                    gameRoomService.broadcast(roomId, playerJoinedMessage)
-
                     // Слушаем входящие сообщения от этого клиента
                     for (frame in incoming) {
                         frame as? Frame.Text ?: continue
 
                         val engine = gameRoomService.getEngine(roomId)
-                        if (engine == null) { /* ... */ return@webSocket }
 
-                        val currentGameState = engine.getCurrentGameState() // Нужно добавить этот метод в GameEngine
-                        val activePlayerId = currentGameState.playerStates.getOrNull(currentGameState.activePlayerPosition)?.player?.userId
+                        val currentGameState = engine?.getCurrentGameState() // Нужно добавить этот метод в GameEngine
+                        val activePlayerId = currentGameState?.playerStates?.getOrNull(currentGameState.activePlayerPosition)?.player?.userId
 
-                        if (activePlayerId != userId) {
-                            // Не ход этого игрока, ничего не делаем (или отправляем ошибку)
-                            continue
-                        }
+                        val isActiveFlag = activePlayerId == userId
 
                         val incomingMessage = Json.decodeFromString<IncomingMessage>(frame.readText())
 
                         when (incomingMessage) {
-                            is IncomingMessage.Fold -> engine.processFold(userId)
-                            is IncomingMessage.Bet -> engine.processBet(userId, incomingMessage.amount)
-                            is IncomingMessage.Check -> engine.processCheck(userId)
-                            is IncomingMessage.Call -> engine.processCall(userId)
-                            is IncomingMessage.SelectRunCount -> engine.processRunItSelection(userId, incomingMessage.times)
-                            is IncomingMessage.PerformSocialAction -> engine.processSocialAction(userId, incomingMessage.action)
+                            is IncomingMessage.Fold -> if(isActiveFlag) engine.processFold(userId)
+                            is IncomingMessage.Bet -> if(isActiveFlag) engine.processBet(userId, incomingMessage.amount)
+                            is IncomingMessage.Check -> if(isActiveFlag) engine.processCheck(userId)
+                            is IncomingMessage.Call -> if(isActiveFlag) engine.processCall(userId)
+                            is IncomingMessage.SelectRunCount -> if(isActiveFlag) engine.processRunItSelection(userId, incomingMessage.times)
+                            is IncomingMessage.PerformSocialAction -> if(isActiveFlag) engine.processSocialAction(userId, incomingMessage.action)
+                            is IncomingMessage.SetReady -> gameRoomService.setPlayerReady(roomId, userId, incomingMessage.isReady)
                         }
                     }
                 } catch (e: Exception) {

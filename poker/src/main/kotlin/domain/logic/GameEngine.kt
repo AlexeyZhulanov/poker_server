@@ -74,6 +74,17 @@ class GameEngine(
 
     fun startNewHand() {
         val room = gameRoomService.getRoom(roomId) ?: return // Если комната уже не существует, выходим
+
+        if (room.players.size < 2) {
+            println("EXIT < 2 players")
+            gameState = GameState(roomId = roomId)
+            val message = OutgoingMessage.GameStateUpdate(null)
+            launch { gameRoomService.sendToPlayer(roomId, room.players.first().userId, message) }
+            blindIncreaseJob?.cancel()
+            gameRoomService.setAllPlayersUnready(roomId = roomId)
+            return
+        }
+
         // 1. Определяем игроков для новой раздачи (у кого есть стек)
         playersInGame = if (gameState.playerStates.isEmpty()) {
             // Первая раздача, берем всех из комнаты
@@ -258,6 +269,13 @@ class GameEngine(
 
         val activePlayers = gameState.playerStates.filter { !it.hasFolded }
         if (activePlayers.size <= 1) {
+            val size = gameState.communityCards.size
+            val needToFullTable = 5 - size
+            if(needToFullTable > 0) {
+                gameState = gameState.copy(
+                    communityCards = gameState.communityCards + deck.deal(needToFullTable)
+                )
+            }
             handleShowdown()
             return
         }
@@ -415,7 +433,7 @@ class GameEngine(
             gameState = gameState.copy(stage = GameStage.SHOWDOWN)
 
             broadcastGameState()
-            delay(3000L) // задержка перед следующей раздачей
+            delay(7000L) // задержка перед следующей раздачей
 
             // Перед стартом новой руки очищаем результаты вскрытия
             gameState = gameState.copy(showdownResults = null)
@@ -587,7 +605,7 @@ class GameEngine(
         gameRoomService.broadcast(roomId, finalMessage)
 
         // 7. Ждем и начинаем новую раздачу
-        delay(5000L) // Даем больше времени на просмотр
+        delay(10000L) // Даем больше времени на просмотр
         startNewHand()
     }
 
