@@ -77,6 +77,7 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                             is IncomingMessage.AgreeRunCount -> engine?.processFavoriteRunConfirmation(userId, incomingMessage.isAgree)
                             is IncomingMessage.PerformSocialAction -> engine?.processSocialAction(userId, incomingMessage.action)
                             is IncomingMessage.SetReady -> gameRoomService.setPlayerReady(roomId, userId, incomingMessage.isReady)
+                            is IncomingMessage.SitAtTable -> gameRoomService.handleSitAtTable(roomId, userId, incomingMessage.buyIn)
                         }
                     }
                 } catch (e: Exception) {

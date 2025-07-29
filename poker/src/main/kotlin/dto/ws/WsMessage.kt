@@ -4,6 +4,7 @@ import com.example.domain.model.Card
 import com.example.domain.model.GameRoom
 import com.example.domain.model.GameState
 import com.example.domain.model.Player
+import com.example.domain.model.PlayerStatus
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -49,10 +50,14 @@ sealed interface OutgoingMessage {
     @SerialName("out.tournament_winner")
     data class TournamentWinner(val winnerUsername: String) : OutgoingMessage
     @Serializable
+    @SerialName("out.start_board_run")
+    data class StartBoardRun(val runIndex: Int, val totalRuns: Int) : OutgoingMessage
+    @Serializable
     @SerialName("out.equity_update")
     data class AllInEquityUpdate(
         val equities: Map<String, Double>, // <UserID, Equity>
-        val outs: Map<String, OutsInfo> = emptyMap() // <UserID, OutsInfo>
+        val outs: Map<String, OutsInfo> = emptyMap(), // <UserID, OutsInfo>
+        val runIndex: Int // Номер прогона, к которому относится это эквити
     ) : OutgoingMessage
     @Serializable
     @SerialName("out.run_multiple_result")
@@ -75,6 +80,9 @@ sealed interface OutgoingMessage {
     @Serializable
     @SerialName("out.player_ready_update")
     data class PlayerReadyUpdate(val userId: String, val isReady: Boolean) : OutgoingMessage
+    @Serializable
+    @SerialName("out.player_status_update")
+    data class PlayerStatusUpdate(val userId: String, val status: PlayerStatus, val stack: Long) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер
@@ -104,4 +112,7 @@ sealed interface IncomingMessage {
     @Serializable
     @SerialName("in.set_ready")
     data class SetReady(val isReady: Boolean) : IncomingMessage
+    @Serializable
+    @SerialName("in.sit_at_table")
+    data class SitAtTable(val buyIn: Long) : IncomingMessage
 }
