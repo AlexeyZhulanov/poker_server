@@ -3,7 +3,6 @@ package com.example.domain.logic
 import com.example.domain.model.*
 import com.example.dto.ws.*
 import com.example.services.GameRoomService
-import com.example.util.secureShuffle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -12,14 +11,14 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class GameEngine(
-    private val room: GameRoom,
+    private val roomId: String,
     private val gameRoomService: GameRoomService
 ) : CoroutineScope {
     private val job = Job()
     override val coroutineContext = job + Dispatchers.Default
 
     private var deck = CardDeck()
-    private var gameState: GameState = GameState(roomId = room.roomId)
+    private var gameState: GameState = GameState(roomId = roomId)
     private var roundIsOver: Boolean = false
     private var currentDealerPosition = -1
     private var currentLevelIndex = 0
@@ -29,18 +28,13 @@ class GameEngine(
     private var runItOffer: RunItOffer? = null
 
     init {
+        val room = gameRoomService.getRoom(roomId)
         // Если это турнир, запускаем таймер
-        if (room.gameMode == GameMode.TOURNAMENT && room.levelDurationMinutes != null) {
-            startBlindTimer(room.levelDurationMinutes)
+        if(room != null) {
+            if (room.gameMode == GameMode.TOURNAMENT && room.blindStructureType != null) {
+                startBlindTimer(room.blindStructureType, room)
+            }
         }
-    }
-
-    fun getCountPlayers(): Int {
-        return room.players.size
-    }
-
-    fun handlePlayerConnect(newPlayer: Player) {
-        room.players = room.players + newPlayer
     }
 
     fun handlePlayerDisconnect(userId: String) {
@@ -49,11 +43,14 @@ class GameEngine(
         if (playerState != null && !playerState.hasFolded) {
             processFold(userId)
         }
-        val player = room.players.first { it.userId == userId }
-        room.players = room.players - player
     }
 
-    private fun startBlindTimer(durationMinutes: Int) {
+    private fun startBlindTimer(blindStructureType: BlindStructureType, room: GameRoom) {
+        val durationMinutes = when(blindStructureType) {
+            BlindStructureType.STANDARD -> 10
+            BlindStructureType.FAST -> 5
+            BlindStructureType.TURBO -> 3
+        }
         blindIncreaseJob = launch {
             while (isActive) {
                 delay(durationMinutes * 60 * 1000L)
@@ -63,7 +60,7 @@ class GameEngine(
                 val newLevel = room.blindStructure?.getOrNull(currentLevelIndex)
                 if (newLevel != null) {
                     // Создаем и рассылаем сообщение
-                    val message = OutgoingMessage.BlindsUp(newLevel.smallBlind, newLevel.bigBlind, newLevel.level)
+                    val message = OutgoingMessage.BlindsUp(newLevel.smallBlind, newLevel.bigBlind, newLevel.ante, newLevel.level)
                     gameRoomService.broadcast(room.roomId, message)
                 }
             }
@@ -75,42 +72,64 @@ class GameEngine(
     }
 
     fun startNewHand() {
+        val room = gameRoomService.getRoom(roomId) ?: return // Если комната уже не существует, выходим
+
+        if (room.players.size < 2) {
+            println("EXIT < 2 players")
+            gameState = GameState(roomId = roomId)
+            val message = OutgoingMessage.GameStateUpdate(null)
+            launch { gameRoomService.sendToPlayer(roomId, room.players.first().userId, message) }
+            blindIncreaseJob?.cancel()
+            gameRoomService.setAllPlayersUnready(roomId = roomId)
+            return
+        }
+
         // 1. Определяем игроков для новой раздачи (у кого есть стек)
         playersInGame = if (gameState.playerStates.isEmpty()) {
             // Первая раздача, берем всех из комнаты
-            room.players
+            room.players.filter { it.status == PlayerStatus.IN_HAND }
         } else {
             // Последующие раздачи, фильтруем тех, у кого остались фишки
             gameState.playerStates.filter { it.player.stack > 0 }.map { it.player }
         }
 
         // 2. Проверяем, не закончился ли турнир
-        if (playersInGame.size < 2 && room.gameMode == GameMode.TOURNAMENT) {
-            val winnerUsername = playersInGame.firstOrNull()?.username ?: "Unknown"
-            // Отправляем всем сообщение о победителе
-            launch {
-                gameRoomService.broadcast(room.roomId, OutgoingMessage.TournamentWinner(winnerUsername))
+        if (playersInGame.size < 2) {
+            if(room.gameMode == GameMode.TOURNAMENT) {
+                val winnerUsername = playersInGame.firstOrNull()?.username ?: "Unknown"
+                // Отправляем всем сообщение о победителе
+                launch {
+                    gameRoomService.broadcast(room.roomId, OutgoingMessage.TournamentWinner(winnerUsername))
+                }
+                destroy() // Останавливаем движок
+                return
             }
-            destroy() // Останавливаем движок
+            println("EXIT < 2 gameroom players")
+            gameState = GameState(roomId = roomId)
+            val message = OutgoingMessage.GameStateUpdate(null)
+            launch {
+                room.players.forEach { player ->
+                    gameRoomService.sendToPlayer(roomId, player.userId, message)
+                }
+            }
+            gameRoomService.setAllPlayersUnready(roomId = roomId)
             return
         }
 
         // 3. Создаем новую колоду
         deck.newDeck()
         roundIsOver = false
-        val smallBlindAmount: Long
-        val bigBlindAmount: Long
 
-        // Получаем блайнды в зависимости от режима игры
-        if (room.gameMode == GameMode.TOURNAMENT && room.blindStructure != null) {
-            val currentLevel = room.blindStructure.getOrNull(currentLevelIndex) ?: room.blindStructure.last()
-            smallBlindAmount = currentLevel.smallBlind
-            bigBlindAmount = currentLevel.bigBlind
+        val currentLevel = if (room.gameMode == GameMode.TOURNAMENT && room.blindStructure != null) {
+            room.blindStructure.getOrNull(currentLevelIndex) ?: room.blindStructure.last()
         } else {
-            // Фиксированные блайнды для кэш-игры
-            smallBlindAmount = 10L
-            bigBlindAmount = 20L
+            // Для кэш-игры используем "нулевой" уровень с фиксированными блайндами
+            BlindLevel(level = 0, smallBlind = 10, bigBlind = 20)
         }
+
+        val smallBlindAmount = currentLevel.smallBlind
+        val bigBlindAmount = currentLevel.bigBlind
+        val anteAmount = currentLevel.ante
 
         // 4. Двигаем дилера и блайнды
         currentDealerPosition = (currentDealerPosition + 1) % playersInGame.size
@@ -118,18 +137,26 @@ class GameEngine(
         val bbPos = (currentDealerPosition + 2) % playersInGame.size
         val actionPos = (currentDealerPosition + 3) % playersInGame.size
 
-        // 5. Создаем начальное состояние игроков
+        var potFromBlindsAndAntes = 0L
+
+        // 5. Создаем начальное состояние игроков, собирая блайнды и анте
         val initialPlayerStates = playersInGame.mapIndexed { index, player ->
             val sbPost = if (index == sbPos) minOf(player.stack, smallBlindAmount) else 0L
             val bbPost = if (index == bbPos) minOf(player.stack, bigBlindAmount) else 0L
+            // Каждый игрок ставит анте (если оно есть)
+            val antePost = if (anteAmount > 0) minOf(player.stack - sbPost - bbPost, anteAmount) else 0L
+
             val totalBet = sbPost + bbPost
+            val totalContribution = totalBet + antePost
+            potFromBlindsAndAntes += totalContribution
+
             PlayerState(
-                player = player.copy(stack = player.stack - totalBet),
+                player = player.copy(stack = player.stack - totalContribution),
                 cards = deck.deal(2),
-                currentBet = totalBet,
-                handContribution = totalBet,
+                currentBet = totalBet, // Анте идет сразу в банк, не считается частью ставки
+                handContribution = totalContribution,
                 hasActedThisRound = false,
-                isAllIn = player.stack - totalBet <= 0
+                isAllIn = player.stack - totalContribution <= 0
             )
         }
 
@@ -140,7 +167,7 @@ class GameEngine(
             playerStates = initialPlayerStates,
             dealerPosition = currentDealerPosition,
             activePlayerPosition = actionPos,
-            pot = initialPlayerStates.sumOf { it.currentBet },
+            pot = potFromBlindsAndAntes,
             amountToCall = bigBlindAmount,
             lastRaiseAmount = bigBlindAmount,
             lastAggressorPosition = bbPos
@@ -159,7 +186,8 @@ class GameEngine(
     fun processCheck(userId: String) {
         val playerState = getPlayerState(userId) ?: return
         if (playerState.currentBet < gameState.amountToCall) {
-            launch { gameRoomService.sendToPlayer(room.roomId, userId, OutgoingMessage.ErrorMessage("Cannot check")) }
+            println("Cannot check")
+            launch { gameRoomService.sendToPlayer(roomId, userId, OutgoingMessage.ErrorMessage("Cannot check")) }
             return
         }
         updatePlayerState(userId) { it.copy(hasActedThisRound = true) }
@@ -187,7 +215,7 @@ class GameEngine(
     fun processBet(userId: String, amount: Long) {
         val playerState = getPlayerState(userId) ?: return
         // Проверка, достаточно ли фишек у игрока
-        if (amount > playerState.player.stack) {
+        if (amount > (playerState.player.stack + playerState.currentBet)) {
             println("Action validation failed: Bet amount ($amount) is larger than stack (${playerState.player.stack}).")
             return // Недостаточно фишек
         }
@@ -249,12 +277,24 @@ class GameEngine(
     }
 
     private fun findNextPlayerOrEndRound() {
-        if (checkForAllInShowdown()) return
-
         val activePlayers = gameState.playerStates.filter { !it.hasFolded }
         if (activePlayers.size <= 1) {
-            handleShowdown()
-            return
+            // Если остался один (или ноль) игроков, раздача окончена.
+            val winnerId = activePlayers.firstOrNull()?.player?.userId
+            if (winnerId != null) {
+                // Используем наш существующий метод для передачи фишек победителю.
+                distributeWinnings(listOf(winnerId), gameState.pot)
+            }
+
+            // Рассылаем финальное состояние, чтобы UI показал, как победитель получил фишки,
+            // и запускаем новую раздачу через 3 секунды.
+            launch {
+                broadcastGameState()
+                delay(3000L) // Пауза для просмотра результата
+                startNewHand()
+            }
+            println("Players folded, start new game")
+            return // Важно выйти из функции здесь
         }
 
         // Игроки, которые еще могут делать ставки (не all-in и не fold)
@@ -306,19 +346,29 @@ class GameEngine(
         )
     }
 
-    private fun advanceToNextStage(isAllInShowdown: Boolean = false) {
+    private fun advanceToNextStage() {
         // 1. Сначала сбрасываем ставки игроков с прошлого раунда, если это не all-in шоудаун
-        if (!isAllInShowdown) {
-            val newPlayerStates = gameState.playerStates.map { it.copy(currentBet = 0, hasActedThisRound = false) }
-            val nextAggressor = if (gameState.stage == GameStage.PRE_FLOP) null else gameState.lastAggressorPosition
-            gameState = gameState.copy(
-                playerStates = newPlayerStates,
-                amountToCall = 0,
-                lastRaiseAmount = 0,
-                lastAggressorPosition = nextAggressor
-            )
-            roundIsOver = false
+        // Проверяем, сколько игроков еще могут делать ставки (не fold и не all-in)
+        val playersWhoCanStillBet = gameState.playerStates.filter { !it.hasFolded && !it.isAllIn }
+
+        // Если таких игроков меньше двух, значит, торги завершены и это all-in шоудаун
+        if (playersWhoCanStillBet.size < 2) {
+            // Убедимся, что в раздаче все еще есть хотя бы 2 игрока (остальные в all-in)
+            if (gameState.playerStates.count { !it.hasFolded } >= 2) {
+                initiateRunItMultipleTimesNegotiation() // Запускаем логику "Run it Twice"
+                return // Выходим, чтобы не продолжать обычный раунд
+            }
         }
+
+        val newPlayerStates = gameState.playerStates.map { it.copy(currentBet = 0, hasActedThisRound = false) }
+        val nextAggressor = if (gameState.stage == GameStage.PRE_FLOP) null else gameState.lastAggressorPosition
+        gameState = gameState.copy(
+            playerStates = newPlayerStates,
+            amountToCall = 0,
+            lastRaiseAmount = 0,
+            lastAggressorPosition = nextAggressor
+        )
+        roundIsOver = false
 
         // 2. Раздаем карты на стол в зависимости от текущей стадии
         when (gameState.stage) {
@@ -342,22 +392,13 @@ class GameEngine(
             }
             GameStage.RIVER -> {
                 gameState = gameState.copy(stage = GameStage.SHOWDOWN)
-                // Если мы дошли до ривера в режиме all-in, шоудаун уже обрабатывается в executeStagedShowdown
-                if (!isAllInShowdown) {
-                    handleShowdown()
-                }
+                handleShowdown()
                 return
             }
             GameStage.SHOWDOWN -> return // Уже на вскрытии, ничего не делаем
         }
 
-        // 3. Если это all-in шоудаун, мы просто рассылаем состояние с новыми картами и выходим
-        if (isAllInShowdown) {
-            launch { broadcastGameState() }
-            return
-        }
-
-        // 4. Эта логика выполняется только для обычных раундов торгов
+        // 3. Эта логика выполняется только для обычных раундов торгов
         advanceToNextActivePlayer()
     }
 
@@ -366,6 +407,7 @@ class GameEngine(
     }
 
     private fun handleShowdown() {
+        println("SHOWDOWN CALLED")
         launch {
             // Убедимся, что все ставки на столе включены в общий вклад игроков
             // Это важно для корректного расчета банков
@@ -407,10 +449,12 @@ class GameEngine(
                 }
             }
 
+            checkForSpectators()
+
             gameState = gameState.copy(stage = GameStage.SHOWDOWN)
 
             broadcastGameState()
-            delay(8000L)
+            delay(7000L) // задержка перед следующей раздачей
 
             // Перед стартом новой руки очищаем результаты вскрытия
             gameState = gameState.copy(showdownResults = null)
@@ -469,14 +513,14 @@ class GameEngine(
         job.cancel()
     }
 
-    private suspend fun broadcastGameState() {
+    private suspend fun broadcastGameState(forceRevealCards: Boolean = false) {
         // Для каждого игрока в текущей раздаче...
         gameState.playerStates.forEach { playerState ->
             // 1. Создаем его персональную версию состояния игры
             val personalizedState = gameState.copy(
                 playerStates = gameState.playerStates.map { otherPlayerState ->
                     // Скрываем карты всех, кроме него самого (если не вскрытие)
-                    if (otherPlayerState.player.userId != playerState.player.userId && gameState.stage != GameStage.SHOWDOWN) {
+                    if (!forceRevealCards && otherPlayerState.player.userId != playerState.player.userId && gameState.stage != GameStage.SHOWDOWN) {
                         otherPlayerState.copy(cards = emptyList())
                     } else {
                         otherPlayerState
@@ -487,154 +531,195 @@ class GameEngine(
             val message = OutgoingMessage.GameStateUpdate(personalizedState)
 
             // 3. Просим GameRoomService отправить это сообщение конкретному игроку
-            gameRoomService.sendToPlayer(room.roomId, playerState.player.userId, message)
+            gameRoomService.sendToPlayer(roomId, playerState.player.userId, message)
         }
     }
 
-    private fun checkForAllInShowdown(): Boolean {
-        val activePlayers = gameState.playerStates.filter { !it.hasFolded }
-        val playersInAllIn = activePlayers.filter { it.isAllIn }
+    private fun initiateRunItMultipleTimesNegotiation() {
+        launch {
+            broadcastGameState(forceRevealCards = true)
+            println("----RUN MULTIPLE CALLED----")
+            calculateAndBroadcastEquity(gameState.communityCards, 1)
+            delay(2000L) // Пауза для игроков // todo думаю уменьшить или убрать вообще
+            val activePlayers = gameState.playerStates.filter { !it.hasFolded }
+            val playersInAllIn = activePlayers.filter { it.isAllIn }
+            val room = gameRoomService.getRoom(roomId)
 
-        val isAllInSituation = activePlayers.size >= 2 && (activePlayers.size - playersInAllIn.size) <= 1
-
-        if (isAllInSituation && runItState == RunItState.NONE) {
-            launch {
-                val contenders = gameState.playerStates.filter { !it.hasFolded }
-                val contenderIds = contenders.map { it.player.userId }.toSet()
-
-                // Рассчитываем, сколько раз можно прокрутить доску
-                val usedCardsCount = contenders.sumOf { it.cards.size } + gameState.communityCards.size
-                val remainingDeckSize = 52 - usedCardsCount
-                val cardsNeededPerRun = 5 - gameState.communityCards.size
-                val maxRuns = if (cardsNeededPerRun > 0) remainingDeckSize / cardsNeededPerRun else 1
-
-                if (maxRuns > 1) {
-                    // Сохраняем состояние предложения
-                    runItOffer = RunItOffer(contenderIds, maxRuns)
-                    runItState = RunItState.AWAITING_PLAYER_CHOICES
-
-                    val options = (1..maxRuns).toList()
-                    val offerMessage = OutgoingMessage.OfferRunItMultipleTimes(options)
-
-                    // Рассылаем предложение ВСЕМ участникам all-in
-                    contenderIds.forEach { userId ->
-                        gameRoomService.sendToPlayer(room.roomId, userId, offerMessage)
-                    }
-                } else {
-                    // Если нельзя крутить несколько раз, сразу запускаем обычный шоудаун
-                    executeMultiRunShowdown(1)
-                }
+            if (room?.gameMode != GameMode.CASH) {
+                // Если турнир, то крутим один раз
+                executeMultiRunShowdown(1); return@launch
             }
-            return true
+
+            val underdog = playersInAllIn.minByOrNull { it.handContribution }
+            if (underdog == null) {
+                // Если по какой-то причине не нашли (хотя не должны), просто крутим один раз
+                executeMultiRunShowdown(1); return@launch
+            }
+            val underdogId = underdog.player.userId
+            val contenderIds = activePlayers.map { it.player.userId }.toSet()
+            val favoriteIds = contenderIds - underdogId
+
+            // Сохраняем состояние предложения
+            runItOffer = RunItOffer(underdogId, favoriteIds.toSet())
+            runItState = RunItState.AWAITING_UNDERDOG_CHOICE
+
+            // Отсылаем предложение андердогу
+            gameRoomService.sendToPlayer(roomId, underdogId, OutgoingMessage.OfferRunItForUnderdog)
         }
-        return false
     }
 
     private suspend fun executeMultiRunShowdown(runCount: Int) {
-        calculateAndBroadcastEquity()
-        delay(3000L) // Пауза для игроков
-
-        while (gameState.stage != GameStage.RIVER && gameState.stage != GameStage.SHOWDOWN) {
-            advanceToNextStage(isAllInShowdown = true) // Раздаем следующую улицу
-            calculateAndBroadcastEquity() // Пересчитываем и показываем новое эквити
-            delay(3000L)
-        }
-
         val contenders = gameState.playerStates.filter { !it.hasFolded }
         val initialCommunityCards = gameState.communityCards
-        val usedCards = contenders.flatMap { it.cards } + initialCommunityCards
+        //val usedCards = contenders.flatMap { it.cards } + initialCommunityCards
 
-        // 1. Создаем колоду из оставшихся карт и перемешиваем ее
-        val remainingDeck = CardDeck.buildFullDeck()
-            .filter { it !in usedCards }
-            .toMutableList()
-            .apply { secureShuffle() }
+//        val remainingDeck = CardDeck.buildFullDeck()
+//            .filter { it !in usedCards }
+//            .toMutableList()
+//            .apply { secureShuffle() }
 
-        val cardsNeededPerRun = 5 - initialCommunityCards.size
+        val cardsNeededPerStreet = listOf(3, 1, 1).drop(initialCommunityCards.size.takeIf { it > 0 }?.let { if (it < 3) 1 else it - 2 } ?: 0)
+
         val boardResults = mutableListOf<BoardResult>()
-        val potPerRun = gameState.pot / runCount // Делим банк поровну
+        val potPerRun = gameState.pot / runCount
 
-        // 2. Выполняем нужное количество прогонов
-        repeat(runCount) {
-            // 3. Раздаем карты для этой доски
-            val runCommunityCards = remainingDeck.take(cardsNeededPerRun)
-            // Удаляем розданные карты, чтобы они не использовались в следующем прогоне
-            repeat(cardsNeededPerRun) { remainingDeck.removeFirst() }
+        // --- ГЛАВНЫЙ ЦИКЛ ПО ПРОГОНАМ ДОСОК ---
+        for (run in 1..runCount) {
+            // Оповещаем клиент, что начинается новый прогон
+            gameRoomService.broadcast(roomId, OutgoingMessage.StartBoardRun(run, runCount))
+            //delay(1000L)
 
-            val fullBoard = initialCommunityCards + runCommunityCards
+            val currentRunCommunityCards = initialCommunityCards.toMutableList()
+            var isFirst = true
 
-            // 4. Оцениваем руки для этой конкретной доски
-            val hands = contenders.map { playerState ->
-                playerState.player.userId to HandEvaluator.evaluate(playerState.cards + fullBoard)
+            // --- ВНУТРЕННИЙ ЦИКЛ ПО УЛИЦАМ (ФЛОП, ТЕРН, РИВЕР) ---
+            for (cardsToDeal in cardsNeededPerStreet) {
+                // Считаем и отправляем эквити для текущего состояния
+                if(isFirst) isFirst = false
+                else calculateAndBroadcastEquity(currentRunCommunityCards, run)
+
+                //delay(2000L)
+
+                // Раздаем карты для следующей улицы
+                currentRunCommunityCards.addAll(deck.deal(cardsToDeal))
+//                repeat(cardsToDeal) {
+//                    if (remainingDeck.isNotEmpty()) {
+//                        currentRunCommunityCards.add(remainingDeck.removeFirst())
+//                    }
+//                }
+
+                // Обновляем GameState для этого прогона
+                val tempGameState = gameState.copy(
+                    communityCards = currentRunCommunityCards,
+                    runIndex = run
+                )
+                gameRoomService.broadcast(roomId, OutgoingMessage.GameStateUpdate(tempGameState))
+                //delay(2000L)
             }
+
+            // Финальное эквити, когда уже 5 карт на столе
+            calculateAndBroadcastEquity(currentRunCommunityCards, run)
+
+            // Определяем победителя для этой доски
+            val hands = contenders.map { ps -> ps.player.userId to HandEvaluator.evaluate(ps.cards + currentRunCommunityCards) }
             val bestHand = hands.maxByOrNull { it.second }?.second
-            val winnersForThisBoard = hands.filter { it.second == bestHand }.map { (userId, _) ->
-                gameState.playerStates.find { it.player.userId == userId }!!.player.username
-            }
+            val winners = hands.filter { it.second == bestHand }.map { (userId, _) -> getPlayerState(userId)!!.player.username }
 
-            // 5. Сохраняем результат для этой доски и распределяем часть банка
-            boardResults.add(BoardResult(fullBoard, winnersForThisBoard))
-            distributeWinnings(winnersForThisBoard.map { username -> contenders.find { it.player.username == username }!!.player.userId }, potPerRun)
+            boardResults.add(BoardResult(currentRunCommunityCards, winners))
+            distributeWinnings(winners.map { username -> contenders.find { it.player.username == username }!!.player.userId }, potPerRun)
         }
 
-        // 6. Отправляем итоговый результат со всеми досками на клиент
-        val finalMessage = OutgoingMessage.RunItMultipleTimesResult(boardResults)
-        gameRoomService.broadcast(room.roomId, finalMessage)
+        // Отправляем итоговый результат со всеми досками
+        gameRoomService.broadcast(roomId, OutgoingMessage.RunItMultipleTimesResult(boardResults))
 
-        // 7. Ждем и начинаем новую раздачу
-        delay(10000L) // Даем больше времени на просмотр
+        // После распределения всех банков проверяем, не выбыл ли кто-то
+        checkForSpectators()
+
+        delay(10000L)
         startNewHand()
     }
 
-    fun processRunItSelection(userId: String, times: Int) {
-        val offer = runItOffer ?: return
-        // Проверяем, что мы в правильном состоянии и ответ пришел от участника раздачи
-        if (runItState != RunItState.AWAITING_PLAYER_CHOICES || userId !in offer.contenders) {
-            return
-        }
-        // Проверяем, что игрок еще не отвечал и его выбор корректен
-        if (offer.responses.containsKey(userId) || times !in 1..offer.maxRuns) {
-            return
-        }
-
-        offer.responses[userId] = times
-
-        // Проверяем, ответили ли все
-        if (offer.responses.size == offer.contenders.size) {
-            // Все ответили. Проверяем, все ли выбрали одно и то же число > 1
-            val firstChoice = offer.responses.values.first()
-            val allChoseSame = offer.responses.values.all { it == firstChoice }
-
-            val runCount = if (allChoseSame && firstChoice > 1) {
-                firstChoice
+    private suspend fun checkForSpectators() {
+        val updatedPlayerStates = gameState.playerStates.map { playerState ->
+            if (playerState.player.stack <= 0 && !playerState.hasFolded) {
+                // Игрок проиграл все фишки, меняем его статус
+                playerState.copy(
+                    player = playerState.player.copy(status = PlayerStatus.SPECTATING)
+                )
             } else {
-                1 // Если есть разногласия или кто-то выбрал 1, крутим один раз
+                playerState
             }
-
-            // Сбрасываем состояние и запускаем исполнение
-            runItState = RunItState.NONE
-            this.runItOffer = null
-            launch { executeMultiRunShowdown(runCount) }
         }
-        // Если ответили еще не все, просто ждем
+        gameState = gameState.copy(playerStates = updatedPlayerStates)
+
+        // Оповещаем всех об изменении статусов выбывших игроков
+        updatedPlayerStates.forEach { ps ->
+            if (ps.player.status == PlayerStatus.SPECTATING) {
+                gameRoomService.broadcast(
+                    roomId,
+                    OutgoingMessage.PlayerStatusUpdate(ps.player.userId, PlayerStatus.SPECTATING, 0)
+                )
+            }
+        }
     }
 
-    private suspend fun calculateAndBroadcastEquity() {
+    fun processUnderdogRunChoice(userId: String, times: Int) {
+        val offer = runItOffer ?: return
+        if (runItState != RunItState.AWAITING_UNDERDOG_CHOICE || userId != offer.underdogId) return
+
+        if (times > 1) {
+            offer.chosenRuns = times
+            runItState = RunItState.AWAITING_FAVORITE_CONFIRMATION
+
+            // Отправляем запрос на подтверждение всем остальным
+            val confirmationRequest = OutgoingMessage.OfferRunItMultipleTimes(offer.underdogId, times)
+            launch {
+                offer.favoriteIds.forEach { favoriteId ->
+                    gameRoomService.sendToPlayer(roomId, favoriteId, confirmationRequest)
+                }
+            }
+        } else {
+            // Андердог выбрал 1 раз, сразу запускаем
+            runItState = RunItState.NONE
+            runItOffer = null
+            launch { executeMultiRunShowdown(1) }
+        }
+    }
+
+    fun processFavoriteRunConfirmation(userId: String, accepted: Boolean) {
+        val offer = runItOffer ?: return
+        if (runItState != RunItState.AWAITING_FAVORITE_CONFIRMATION || userId !in offer.favoriteIds) return
+
+        offer.favoriteResponses[userId] = accepted
+
+        // Если все фавориты ответили
+        if (offer.favoriteResponses.keys == offer.favoriteIds) {
+            val allAccepted = offer.favoriteResponses.values.all { it }
+            val finalRunCount = if (allAccepted) offer.chosenRuns else 1
+
+            runItState = RunItState.NONE
+            runItOffer = null
+            launch { executeMultiRunShowdown(finalRunCount) }
+        }
+    }
+
+    private suspend fun calculateAndBroadcastEquity(communityCards: List<Card>, runIndex: Int) {
         val contenders = gameState.playerStates.filter { !it.hasFolded }
         if (contenders.size < 2) return
 
         // Расчет эквити
         val equityPlayersHands = contenders.map { it.cards }
-        val equityResult = calculateEquity(equityPlayersHands, gameState.communityCards)
+        val equityResult = calculateEquity(equityPlayersHands, communityCards)
         val equitiesMap = contenders.mapIndexed { index, ps -> ps.player.userId to equityResult.wins[index] }.toMap()
 
         // Расчет аутов для андердогов
         val topEquityPlayerId = equitiesMap.maxByOrNull { it.value }?.key
         val outsMap = mutableMapOf<String, OutsInfo>()
-        if (topEquityPlayerId != null) {
+        // Если на столе нет карт (префлоп), аутов быть не может.
+        if (topEquityPlayerId != null && communityCards.isNotEmpty()) {
             contenders.filter { it.player.userId != topEquityPlayerId }.forEach { underdog ->
                 val opponentHands = contenders.filter { it.player.userId != underdog.player.userId }.map { it.cards }
-                val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, gameState.communityCards)
+                val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, communityCards)
                 outsMap[underdog.player.userId] = when {
                     directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
                     hasIndirectOuts -> OutsInfo.RunnerRunner
@@ -643,8 +728,8 @@ class GameEngine(
             }
         }
         // Отправка сообщения
-        val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap)
-        gameRoomService.broadcast(room.roomId, equityMessage)
+        val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap, runIndex)
+        gameRoomService.broadcast(roomId, equityMessage)
     }
 
     fun getCurrentGameState(): GameState = gameState
@@ -656,7 +741,7 @@ class GameEngine(
         )
         // Рассылаем всем в комнате
         launch {
-            gameRoomService.broadcast(room.roomId, broadcastMessage)
+            gameRoomService.broadcast(roomId, broadcastMessage)
         }
     }
 }

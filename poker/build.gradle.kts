@@ -29,6 +29,7 @@ dependencies {
     implementation(libs.ktor.serialization.kotlinx.json)
     implementation(libs.ktor.server.websockets)
     implementation(libs.ktor.server.config.yaml)
+    implementation(libs.ktor.server.double.receive)
 
     // Exposed (ORM)
     implementation(libs.exposed.core)

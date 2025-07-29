@@ -1,34 +1,65 @@
 package com.example.services
 
+import com.example.data.predefined.BlindStructures
 import com.example.domain.logic.GameEngine
+import com.example.domain.model.BlindStructureType
 import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
+import com.example.domain.model.PlayerStatus
+import com.example.dto.CreateRoomRequest
 import com.example.dto.ws.OutgoingMessage
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-class GameRoomService {
+class GameRoomService : CoroutineScope {
+    // Создаем Job + Dispatcher. SupervisorJob нужен, чтобы ошибка
+    // в одной корутине (например, при рассылке) не отменила все остальные.
+    override val coroutineContext = SupervisorJob() + Dispatchers.IO
+
     // Используем ConcurrentHashMap для потокобезопасного хранения комнат
     private val rooms = ConcurrentHashMap<String, GameRoom>()
     private val members = ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>>()
     private val engines = ConcurrentHashMap<String, GameEngine>()
+    private val lobbySubscribers = ConcurrentHashMap<String, WebSocketSession>()
 
-    fun createRoom(name: String, mode: GameMode, owner: Player): GameRoom {
+    fun createRoom(request: CreateRoomRequest, owner: Player): GameRoom {
         val roomId = UUID.randomUUID().toString()
+
+        // Определяем структуру блайндов в зависимости от режима
+        val blindStructure = if (request.gameMode == GameMode.TOURNAMENT) {
+            // Выбираем структуру на основе запроса
+            when (request.blindStructureType) {
+                BlindStructureType.FAST -> BlindStructures.fast
+                BlindStructureType.TURBO -> BlindStructures.turbo
+                else -> BlindStructures.standard // STANDARD будет по умолчанию
+            }
+        } else null
+
+        // Создаем комнату, используя данные из запроса
         val room = GameRoom(
             roomId = roomId,
-            name = name,
-            gameMode = mode,
-            players = listOf(),
-            ownerId = owner.userId
+            name = request.name,
+            gameMode = request.gameMode,
+            players = listOf(owner), // Владелец сразу становится первым игроком
+            maxPlayers = request.maxPlayers,
+            ownerId = owner.userId,
+            blindStructure = blindStructure,
+            blindStructureType = request.blindStructureType
         )
         rooms[roomId] = room
-        // Сразу создаем движок для новой комнаты
-        engines[roomId] = GameEngine(room, this)
+
+        // Создаем движок, передавая ему полную информацию о комнате
+        engines[roomId] = GameEngine(roomId, this)
+
+        launch { broadcastLobbyUpdate() }
         return room
     }
 
@@ -48,11 +79,11 @@ class GameRoomService {
         if (room.players.any { it.userId == player.userId }) {
             return room // Игрок уже в комнате
         }
-
-        val updatedRoom = room.copy(players = room.players + player)
+        // Игрок всегда входит как SPECTATING
+        val playerAsSpectator = player.copy(status = PlayerStatus.SPECTATING)
+        val updatedRoom = room.copy(players = room.players + playerAsSpectator)
         rooms[roomId] = updatedRoom
-        engines[roomId]?.handlePlayerConnect(player)
-
+        launch { broadcastLobbyUpdate() } // Оповещаем лобби об изменении состава комнаты
         return updatedRoom
     }
 
@@ -64,6 +95,12 @@ class GameRoomService {
     fun onLeave(roomId: String, userId: String) {
         val roomMembers = members[roomId]
         roomMembers?.remove(userId)
+
+        val room = rooms[roomId] ?: return
+        val players = room.players.toMutableList()
+        val updatedRoom = room.copy(players = players.filterNot { it.userId == userId })
+        rooms[roomId] = updatedRoom
+
         engines[roomId]?.handlePlayerDisconnect(userId)
 
         // Если в комнате не осталось активных сессий, можно ее удалить
@@ -71,6 +108,66 @@ class GameRoomService {
             rooms.remove(roomId)
             engines.remove(roomId)?.destroy()
             members.remove(roomId)
+        }
+        launch { broadcastLobbyUpdate() } // Оповещаем лобби, что комната могла удалиться или состав изменился
+    }
+
+    suspend fun handleSitAtTable(roomId: String, userId: String, buyIn: Long) {
+        val room = rooms[roomId] ?: return
+        var targetPlayer: Player? = null
+
+        // Обновляем список игроков, меняя статус и стек нужного игрока
+        val updatedPlayers = room.players.map {
+            if (it.userId == userId) {
+                targetPlayer = it.copy(status = PlayerStatus.SITTING_OUT, stack = buyIn)
+                targetPlayer
+            } else {
+                it
+            }
+        }
+
+        // Если игрок был найден и обновлен
+        if (targetPlayer != null) {
+            val updatedRoom = room.copy(players = updatedPlayers)
+            rooms[roomId] = updatedRoom
+
+            // Рассылаем всем обновление статуса и стека этого игрока
+            broadcast(
+                roomId,
+                OutgoingMessage.PlayerStatusUpdate(userId, PlayerStatus.SITTING_OUT, buyIn)
+            )
+            // Рассылаем обновление в лобби (изменилось количество активных игроков)
+            broadcastLobbyUpdate()
+        }
+    }
+
+    fun setAllPlayersUnready(roomId: String) {
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map { it.copy(
+                isReady = false,
+                status = if(it.status == PlayerStatus.IN_HAND) PlayerStatus.SITTING_OUT else it.status
+            ) }
+        val updatedRoom = room.copy(players = updatedPlayers)
+        rooms[roomId] = updatedRoom
+    }
+
+    suspend fun setPlayerReady(roomId: String, userId: String, isReady: Boolean) {
+        println("User $userId is Ready: $isReady")
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map { if (it.userId == userId) it.copy(
+            isReady = isReady,
+            status = if (isReady) PlayerStatus.IN_HAND else PlayerStatus.SITTING_OUT
+        ) else it }
+        val updatedRoom = room.copy(players = updatedPlayers)
+        rooms[roomId] = updatedRoom
+
+        // Оповещаем всех об изменении статуса
+        broadcast(roomId, OutgoingMessage.PlayerReadyUpdate(userId, isReady))
+
+        // Проверяем, не пора ли начинать игру
+        val activePlayers = updatedRoom.players
+        if (activePlayers.size >= 2 && activePlayers.all { it.isReady }) {
+            engines[roomId]?.startGame()
         }
     }
 
@@ -91,5 +188,40 @@ class GameRoomService {
 
     fun getEngine(roomId: String): GameEngine? = engines[roomId]
 
-    fun getMembers(roomId: String) = members[roomId]
+    fun getPaginatedRooms(page: Int, limit: Int): List<GameRoom> {
+        return rooms.values
+            .toList()
+            .drop((page - 1) * limit)
+            .take(limit)
+    }
+
+    fun onLobbyJoin(userId: String, session: WebSocketSession) {
+        lobbySubscribers[userId] = session
+    }
+
+    fun onLobbyLeave(userId: String) {
+        lobbySubscribers.remove(userId)
+    }
+
+    // Отправка обновления лобби одному пользователю (когда он только зашел)
+    suspend fun sendLobbyUpdateToOneUser(userId: String) {
+        val session = lobbySubscribers[userId]
+        if (session != null) {
+            val message = OutgoingMessage.LobbyUpdate(getAllRooms())
+            val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+            session.send(Frame.Text(jsonString))
+        }
+    }
+
+    // Рассылка обновления всем в лобби
+    private suspend fun broadcastLobbyUpdate() {
+        if (lobbySubscribers.isEmpty()) return // Нечего делать, если в лобби никого нет
+
+        val message = OutgoingMessage.LobbyUpdate(getAllRooms())
+        val jsonString = Json.encodeToString(OutgoingMessage.serializer(), message)
+
+        lobbySubscribers.values.forEach { session ->
+            session.send(Frame.Text(jsonString))
+        }
+    }
 }

@@ -1,7 +1,10 @@
 package com.example.dto.ws
 
 import com.example.domain.model.Card
+import com.example.domain.model.GameRoom
 import com.example.domain.model.GameState
+import com.example.domain.model.Player
+import com.example.domain.model.PlayerStatus
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -30,40 +33,56 @@ data class BoardResult(
 sealed interface OutgoingMessage {
     @Serializable
     @SerialName("out.game_state")
-    data class GameStateUpdate(val state: GameState) : OutgoingMessage
+    data class GameStateUpdate(val state: GameState?) : OutgoingMessage
     @Serializable
     @SerialName("out.player_joined")
-    data class PlayerJoined(val username: String) : OutgoingMessage
+    data class PlayerJoined(val player: Player) : OutgoingMessage
     @Serializable
     @SerialName("out.player_left")
-    data class PlayerLeft(val username: String) : OutgoingMessage
+    data class PlayerLeft(val userId: String) : OutgoingMessage
     @Serializable
     @SerialName("out.error_message")
     data class ErrorMessage(val message: String) : OutgoingMessage
     @Serializable
     @SerialName("out.blinds_up")
-    data class BlindsUp(val smallBlind: Long, val bigBlind: Long, val level: Int) : OutgoingMessage
+    data class BlindsUp(val smallBlind: Long, val bigBlind: Long, val ante: Long, val level: Int) : OutgoingMessage
     @Serializable
     @SerialName("out.tournament_winner")
     data class TournamentWinner(val winnerUsername: String) : OutgoingMessage
     @Serializable
+    @SerialName("out.start_board_run")
+    data class StartBoardRun(val runIndex: Int, val totalRuns: Int) : OutgoingMessage
+    @Serializable
     @SerialName("out.equity_update")
     data class AllInEquityUpdate(
         val equities: Map<String, Double>, // <UserID, Equity>
-        val outs: Map<String, OutsInfo> = emptyMap() // <UserID, OutsInfo>
+        val outs: Map<String, OutsInfo> = emptyMap(), // <UserID, OutsInfo>
+        val runIndex: Int // Номер прогона, к которому относится это эквити
     ) : OutgoingMessage
     @Serializable
     @SerialName("out.run_multiple_result")
     data class RunItMultipleTimesResult(val results: List<BoardResult>) : OutgoingMessage
     @Serializable
     @SerialName("out.run_multiple_offer")
-    data class OfferRunItMultipleTimes(val options: List<Int>) : OutgoingMessage
+    data class OfferRunItMultipleTimes(val underdogId: String, val times: Int) : OutgoingMessage
+    @Serializable
+    @SerialName("out.run_offer_underdog")
+    data object OfferRunItForUnderdog : OutgoingMessage
     @Serializable
     @SerialName("out.social_action_broadcast")
     data class SocialActionBroadcast(
         val fromPlayerId: String, // ID того, кто совершил действие
         val action: SocialAction // Само действие
     ) : OutgoingMessage
+    @Serializable
+    @SerialName("out.lobby_update")
+    data class LobbyUpdate(val rooms: List<GameRoom>) : OutgoingMessage
+    @Serializable
+    @SerialName("out.player_ready_update")
+    data class PlayerReadyUpdate(val userId: String, val isReady: Boolean) : OutgoingMessage
+    @Serializable
+    @SerialName("out.player_status_update")
+    data class PlayerStatusUpdate(val userId: String, val status: PlayerStatus, val stack: Long) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер
@@ -85,6 +104,15 @@ sealed interface IncomingMessage {
     @SerialName("in.run_count")
     data class SelectRunCount(val times: Int) : IncomingMessage
     @Serializable
+    @SerialName("in.agree_run_count")
+    data class AgreeRunCount(val isAgree: Boolean) : IncomingMessage
+    @Serializable
     @SerialName("in.social_action")
     data class PerformSocialAction(val action: SocialAction) : IncomingMessage
+    @Serializable
+    @SerialName("in.set_ready")
+    data class SetReady(val isReady: Boolean) : IncomingMessage
+    @Serializable
+    @SerialName("in.sit_at_table")
+    data class SitAtTable(val buyIn: Long) : IncomingMessage
 }

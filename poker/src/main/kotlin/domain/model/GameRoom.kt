@@ -7,9 +7,10 @@ data class GameRoom(
     val roomId: String,
     val name: String,
     val gameMode: GameMode,
-    var players: List<Player>,
+    val players: List<Player>,
     val maxPlayers: Int = 9,
     val ownerId: String,
+    val blindStructureType: BlindStructureType? = null,
     val blindStructure: List<BlindLevel>? = null,
-    val levelDurationMinutes: Int? = null,
+    val gameStarted: Boolean = false
 )

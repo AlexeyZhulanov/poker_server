@@ -6,5 +6,7 @@ import kotlinx.serialization.Serializable
 data class Player(
     val userId: String,
     val username: String,
-    val stack: Long // Стек фишек игрока за этим столом
+    val stack: Long,
+    val status: PlayerStatus = PlayerStatus.SPECTATING,
+    val isReady: Boolean = false
 )

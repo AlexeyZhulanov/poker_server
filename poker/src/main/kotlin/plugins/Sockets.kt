@@ -22,6 +22,23 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
     }
     routing {
         authenticate("auth-jwt") {
+            webSocket("/lobby") {
+                val principal = call.principal<JWTPrincipal>()!!
+                val userId = principal.payload.getClaim("userId").asString()
+
+                try {
+                    // Добавляем пользователя в список "слушающих" лобби
+                    gameRoomService.onLobbyJoin(userId, this)
+                    // Сразу отправляем ему текущий список комнат
+                    gameRoomService.sendLobbyUpdateToOneUser(userId)
+
+                    // Держим соединение открытым, чтобы слушать, пока юзер не отключится
+                    for (frame in incoming) { /* Ничего не делаем с входящими */ }
+                } finally {
+                    // Когда пользователь уходит с экрана лобби, он отключается
+                    gameRoomService.onLobbyLeave(userId)
+                }
+            }
             webSocket("/play/{roomId}") {
                 val principal = call.principal<JWTPrincipal>() ?: return@webSocket
                 val userId = principal.payload.getClaim("userId").asString()
@@ -38,34 +55,29 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                     // Добавляем сессию в менеджер
                     gameRoomService.onJoin(roomId, userId, this)
 
-                    // Оповещаем всех, что игрок присоединился
-                    val playerJoinedMessage = OutgoingMessage.PlayerJoined(player.username)
-                    gameRoomService.broadcast(roomId, playerJoinedMessage)
-
                     // Слушаем входящие сообщения от этого клиента
                     for (frame in incoming) {
                         frame as? Frame.Text ?: continue
 
                         val engine = gameRoomService.getEngine(roomId)
-                        if (engine == null) { /* ... */ return@webSocket }
 
-                        val currentGameState = engine.getCurrentGameState() // Нужно добавить этот метод в GameEngine
-                        val activePlayerId = currentGameState.playerStates.getOrNull(currentGameState.activePlayerPosition)?.player?.userId
+                        val currentGameState = engine?.getCurrentGameState() // Нужно добавить этот метод в GameEngine
+                        val activePlayerId = currentGameState?.playerStates?.getOrNull(currentGameState.activePlayerPosition)?.player?.userId
 
-                        if (activePlayerId != userId) {
-                            // Не ход этого игрока, ничего не делаем (или отправляем ошибку)
-                            continue
-                        }
+                        val isActiveFlag = activePlayerId == userId
 
                         val incomingMessage = Json.decodeFromString<IncomingMessage>(frame.readText())
 
                         when (incomingMessage) {
-                            is IncomingMessage.Fold -> engine.processFold(userId)
-                            is IncomingMessage.Bet -> engine.processBet(userId, incomingMessage.amount)
-                            is IncomingMessage.Check -> engine.processCheck(userId)
-                            is IncomingMessage.Call -> engine.processCall(userId)
-                            is IncomingMessage.SelectRunCount -> engine.processRunItSelection(userId, incomingMessage.times)
-                            is IncomingMessage.PerformSocialAction -> engine.processSocialAction(userId, incomingMessage.action)
+                            is IncomingMessage.Fold -> if(isActiveFlag) engine.processFold(userId)
+                            is IncomingMessage.Bet -> if(isActiveFlag) engine.processBet(userId, incomingMessage.amount)
+                            is IncomingMessage.Check -> if(isActiveFlag) engine.processCheck(userId)
+                            is IncomingMessage.Call -> if(isActiveFlag) engine.processCall(userId)
+                            is IncomingMessage.SelectRunCount -> engine?.processUnderdogRunChoice(userId, incomingMessage.times)
+                            is IncomingMessage.AgreeRunCount -> engine?.processFavoriteRunConfirmation(userId, incomingMessage.isAgree)
+                            is IncomingMessage.PerformSocialAction -> engine?.processSocialAction(userId, incomingMessage.action)
+                            is IncomingMessage.SetReady -> gameRoomService.setPlayerReady(roomId, userId, incomingMessage.isReady)
+                            is IncomingMessage.SitAtTable -> gameRoomService.handleSitAtTable(roomId, userId, incomingMessage.buyIn)
                         }
                     }
                 } catch (e: Exception) {
@@ -73,7 +85,7 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                 } finally {
                     // При отключении (или ошибке) удаляем сессию и оповещаем остальных
                     gameRoomService.onLeave(roomId, userId)
-                    val playerLeftMessage = OutgoingMessage.PlayerLeft(player.username)
+                    val playerLeftMessage = OutgoingMessage.PlayerLeft(player.userId)
                     gameRoomService.broadcast(roomId, playerLeftMessage)
                 }
             }
