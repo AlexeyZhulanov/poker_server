@@ -2,8 +2,9 @@ package com.example.domain.logic
 
 import com.example.domain.logic.HandEvaluator.evaluate
 import com.example.domain.model.Card
+import kotlin.math.roundToInt
 
-data class EquityResult(val wins: List<Double>, val ties: Double)
+data class EquityResult(val wins: List<Double>)
 
 fun calculateEquity(
     players: List<List<Card>>,
@@ -13,35 +14,35 @@ fun calculateEquity(
     val usedCards = players.flatten() + community
     val deck = CardDeck.buildFullDeck().filter { it !in usedCards }.toMutableList()
 
-    val wins = IntArray(players.size) { 0 }
-    var ties = 0
+    val equityShares = DoubleArray(players.size) { 0.0 }
     val missing = 5 - community.size
 
-    repeat(iterations) {
+    (1..iterations).forEach { _ ->
         deck.shuffle()
         val remainingCommunity = deck.take(missing)
         val fullBoard = community + remainingCommunity
 
         // Оцениваем руки всех игроков
         val hands = players.map { evaluate(it + fullBoard) }
-        val maxHand = hands.maxOfOrNull { it }
+        val maxRank = hands.maxOrNull() ?: return@forEach // Находим ранг лучшей руки (return работает как continue)
 
-        // Считаем сколько игроков имеют максимальную руку
-        val winnersCount = hands.count { it == maxHand }
+        // Находим ВСЕХ игроков с лучшей рукой
+        val winnerIndices = hands.mapIndexedNotNull { index, rank ->
+            if (rank == maxRank) index else null
+        }
 
-        if (winnersCount > 1) {
-            ties++
-        } else {
-            val winnerIndex = hands.indexOf(maxHand)
-            if (winnerIndex != -1) {
-                wins[winnerIndex]++
+        if (winnerIndices.isNotEmpty()) {
+            // Распределяем "1 очко" победы между всеми победителями
+            val share = 1.0 / winnerIndices.size
+            winnerIndices.forEach { winnerIndex ->
+                equityShares[winnerIndex] += share
             }
         }
     }
 
+    // Конвертируем долю в итоговый процент
     return EquityResult(
-        wins = wins.map { it * 100.0 / iterations },
-        ties = ties * 100.0 / iterations
+        wins = equityShares.map { (it * 100.0 / iterations * 100).roundToInt() / 100.0 }
     )
 }
 

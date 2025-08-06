@@ -437,15 +437,11 @@ class GameEngine(
                 } else {
                     // Несколько претендентов, оцениваем их руки
                     val hands = contendersForPot.map { playerState ->
-                        playerState.player.userId to HandEvaluator.evaluateBestHandDetailed(playerState.cards + gameState.communityCards)
+                        playerState.player.userId to HandEvaluator.evaluate(playerState.cards + gameState.communityCards)
                     }
 
-                    val bestHandResult = hands.maxByOrNull { it.second.result }?.second?.result
-                    val winners = hands.filter { it.second.result == bestHandResult }
-
-                    // Сохраняем выигрышные карты для отправки на клиент
-                    val showdownHands = winners.associate { (userId, evaluatedHand) -> userId to evaluatedHand.hand }
-                    gameState = gameState.copy(showdownResults = (gameState.showdownResults ?: emptyMap()) + showdownHands)
+                    val bestRank = hands.maxByOrNull { it.second }?.second
+                    val winners = hands.filter { it.second == bestRank }
 
                     // Распределяем этот конкретный банк между победителями
                     distributeWinnings(winners.map { it.first }, pot.amount)
@@ -458,9 +454,6 @@ class GameEngine(
 
             broadcastGameState()
             delay(5000L) // задержка перед следующей раздачей
-
-            // Перед стартом новой руки очищаем результаты вскрытия
-            gameState = gameState.copy(showdownResults = null)
             startNewHand()
         }
     }
@@ -573,12 +566,6 @@ class GameEngine(
     private suspend fun executeMultiRunShowdown(runCount: Int) {
         val contenders = gameState.playerStates.filter { !it.hasFolded }
         val initialCommunityCards = gameState.communityCards
-        //val usedCards = contenders.flatMap { it.cards } + initialCommunityCards
-
-//        val remainingDeck = CardDeck.buildFullDeck()
-//            .filter { it !in usedCards }
-//            .toMutableList()
-//            .apply { secureShuffle() }
 
         val cardsNeededPerStreet = listOf(3, 1, 1).drop(initialCommunityCards.size.takeIf { it > 0 }?.let { if (it < 3) 1 else it - 2 } ?: 0)
 
@@ -599,16 +586,11 @@ class GameEngine(
                 if(isFirst) isFirst = false
                 else {
                     calculateAndBroadcastEquity(currentRunCommunityCards, run)
-                    delay(2000)
+                    delay(3000)
                 }
 
                 // Раздаем карты для следующей улицы
                 currentRunCommunityCards.addAll(deck.deal(cardsToDeal))
-//                repeat(cardsToDeal) {
-//                    if (remainingDeck.isNotEmpty()) {
-//                        currentRunCommunityCards.add(remainingDeck.removeFirst())
-//                    }
-//                }
 
                 // Обновляем GameState для этого прогона
                 val tempGameState = gameState.copy(
@@ -620,12 +602,12 @@ class GameEngine(
 
             // Финальное эквити, когда уже 5 карт на столе
             calculateAndBroadcastEquity(currentRunCommunityCards, run)
-            delay(2000)
+            delay(3000)
 
             // Определяем победителя для этой доски
             val hands = contenders.map { ps -> ps.player.userId to HandEvaluator.evaluate(ps.cards + currentRunCommunityCards) }
-            val bestHand = hands.maxByOrNull { it.second }?.second
-            val winners = hands.filter { it.second == bestHand }.map { (userId, _) -> getPlayerState(userId)!!.player.username }
+            val bestRank = hands.maxByOrNull { it.second }?.second
+            val winners = hands.filter { it.second == bestRank }.map { (userId, _) -> getPlayerState(userId)!!.player.username }
 
             boardResults.add(BoardResult(currentRunCommunityCards, winners))
             distributeWinnings(winners.map { username -> contenders.find { it.player.username == username }!!.player.userId }, potPerRun)
@@ -637,7 +619,7 @@ class GameEngine(
         // После распределения всех банков проверяем, не выбыл ли кто-то
         checkForSpectators()
 
-        delay(7000L)
+        delay(5000L)
         startNewHand()
     }
 
@@ -720,31 +702,33 @@ class GameEngine(
 
         val outsMap = mutableMapOf<String, OutsInfo>()
 
-        // coroutineScope гарантирует, что мы дождемся завершения всех запущенных в нем задач
-        coroutineScope {
-            // 1. Создаем список асинхронных задач для каждого андердога
-            val outsJobs = underdogs.map { underdog ->
-                async {
-                    val opponentHands = contenders
-                        .filter { it.player.userId != underdog.player.userId }
-                        .map { it.cards }
+        if (topEquityPlayerId != null && communityCards.isNotEmpty()) {
+            // coroutineScope гарантирует, что мы дождемся завершения всех запущенных в нем задач
+            coroutineScope {
+                // 1. Создаем список асинхронных задач для каждого андердога
+                val outsJobs = underdogs.map { underdog ->
+                    async {
+                        val opponentHands = contenders
+                            .filter { it.player.userId != underdog.player.userId }
+                            .map { it.cards }
 
-                    // Выполняем тяжелый расчет
-                    val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, communityCards)
+                        // Выполняем тяжелый расчет
+                        val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, communityCards)
 
-                    // Возвращаем пару: ID игрока и результат
-                    underdog.player.userId to when {
-                        directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
-                        hasIndirectOuts -> OutsInfo.RunnerRunner
-                        else -> OutsInfo.DrawingDead
+                        // Возвращаем пару: ID игрока и результат
+                        underdog.player.userId to when {
+                            directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
+                            hasIndirectOuts -> OutsInfo.RunnerRunner
+                            else -> OutsInfo.DrawingDead
+                        }
                     }
                 }
-            }
-            // 2. Ждем, пока ВСЕ задачи по расчету аутов завершатся
-            val outsResults = outsJobs.awaitAll()
+                // 2. Ждем, пока ВСЕ задачи по расчету аутов завершатся
+                val outsResults = outsJobs.awaitAll()
 
-            // 3. Собираем результаты в нашу карту
-            outsMap.putAll(outsResults)
+                // 3. Собираем результаты в нашу карту
+                outsMap.putAll(outsResults)
+            }
         }
         // Отправка сообщения
         val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap, runIndex)
