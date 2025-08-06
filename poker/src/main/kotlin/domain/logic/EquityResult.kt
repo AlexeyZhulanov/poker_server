@@ -2,7 +2,6 @@ package com.example.domain.logic
 
 import com.example.domain.logic.HandEvaluator.evaluate
 import com.example.domain.model.Card
-import com.example.util.secureShuffle
 
 data class EquityResult(val wins: List<Double>, val ties: Double)
 
@@ -13,31 +12,30 @@ fun calculateEquity(
 ): EquityResult {
     val usedCards = players.flatten() + community
     val deck = CardDeck.buildFullDeck().filter { it !in usedCards }.toMutableList()
-    //val rng = Random.Default
 
     val wins = IntArray(players.size) { 0 }
     var ties = 0
-
     val missing = 5 - community.size
 
     repeat(iterations) {
-        //deck.shuffle(rng) // 1.6 sec
-        deck.secureShuffle() // 2.2 sec
+        deck.shuffle()
         val remainingCommunity = deck.take(missing)
         val fullBoard = community + remainingCommunity
 
         // Оцениваем руки всех игроков
         val hands = players.map { evaluate(it + fullBoard) }
-        val maxHand = hands.maxWithOrNull { a, b -> a.compareTo(b) }
+        val maxHand = hands.maxOfOrNull { it }
 
         // Считаем сколько игроков имеют максимальную руку
-        val winners = hands.count { it == maxHand }
+        val winnersCount = hands.count { it == maxHand }
 
-        if (winners > 1) {
+        if (winnersCount > 1) {
             ties++
         } else {
             val winnerIndex = hands.indexOf(maxHand)
-            wins[winnerIndex]++
+            if (winnerIndex != -1) {
+                wins[winnerIndex]++
+            }
         }
     }
 
@@ -52,55 +50,48 @@ fun calculateLiveOuts(
     opponents: List<List<Card>>,
     community: List<Card>
 ): Pair<List<Card>, Boolean> {
+    if (community.isEmpty()) return Pair(emptyList(), false)
+
     val usedCards = player + community + opponents.flatten()
-    val deck = CardDeck.Companion.buildFullDeck().filter { it !in usedCards }
+    val deck = CardDeck.buildFullDeck().filter { it !in usedCards }
     val missing = 5 - community.size
 
     if (missing == 0) return Pair(emptyList(), false)
 
     val outs = mutableSetOf<Card>()
-    var hasIndirectOuts = false
+    var foundAnyIndirectOuts = false
 
     for (card in deck) {
-
-        var isDirectOut = false
-        var isIndirectOut = false
-
-        // Прямая проверка (по одной карте)
         val boardWithOne = community + card
         val playerHand = evaluate(player + boardWithOne)
         val opponentHands = opponents.map { evaluate(it + boardWithOne) }
-        val bestOpponent = opponentHands.maxWithOrNull { a, b -> a.compareTo(b) } ?: continue
+        val bestOpponent = opponentHands.maxByOrNull { it } ?: continue
 
         if (playerHand > bestOpponent) {
-            isDirectOut = true
+            outs.add(card)
+            continue // Если это прямой аут, нет смысла проверять его как непрямой
         }
 
-        // Если не прямая, смотрим комбинации из двух карт
-        if (!isDirectOut && missing == 2) {
+        // Ищем непрямые ауты, только если мы еще не нашли ни одного
+        if (!foundAnyIndirectOuts && missing == 2) {
             val remainingDeck = deck.filter { it != card }
             for (second in remainingDeck) {
                 val fullBoard = community + listOf(card, second)
                 val playerHand2 = evaluate(player + fullBoard)
                 val opponentHands2 = opponents.map { evaluate(it + fullBoard) }
-                val bestOpponent2 = opponentHands2.maxWithOrNull { a, b -> a.compareTo(b) } ?: continue
+                val bestOpponent2 = opponentHands2.maxByOrNull { it } ?: continue
 
                 if (playerHand2 > bestOpponent2) {
-                    isIndirectOut = true
-                    break
+                    foundAnyIndirectOuts = true // Нашли первую возможность, ставим флаг
+                    break // и выходим из внутреннего цикла
                 }
             }
-        }
-
-        when {
-            isDirectOut -> outs.add(card)
-            isIndirectOut -> hasIndirectOuts = true
         }
     }
 
     return if (outs.isNotEmpty()) {
         Pair(outs.toList().sorted(), false)
     } else {
-        Pair(emptyList(), hasIndirectOuts)
+        Pair(emptyList(), foundAnyIndirectOuts)
     }
 }

@@ -6,6 +6,9 @@ import com.example.services.GameRoomService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -290,7 +293,7 @@ class GameEngine(
             // и запускаем новую раздачу через 3 секунды.
             launch {
                 broadcastGameState()
-                delay(3000L) // Пауза для просмотра результата
+                delay(2000L) // Пауза для просмотра результата
                 startNewHand()
             }
             println("Players folded, start new game")
@@ -454,7 +457,7 @@ class GameEngine(
             gameState = gameState.copy(stage = GameStage.SHOWDOWN)
 
             broadcastGameState()
-            delay(7000L) // задержка перед следующей раздачей
+            delay(5000L) // задержка перед следующей раздачей
 
             // Перед стартом новой руки очищаем результаты вскрытия
             gameState = gameState.copy(showdownResults = null)
@@ -540,7 +543,6 @@ class GameEngine(
             broadcastGameState(forceRevealCards = true)
             println("----RUN MULTIPLE CALLED----")
             calculateAndBroadcastEquity(gameState.communityCards, 1)
-            delay(2000L) // Пауза для игроков // todo думаю уменьшить или убрать вообще
             val activePlayers = gameState.playerStates.filter { !it.hasFolded }
             val playersInAllIn = activePlayers.filter { it.isAllIn }
             val room = gameRoomService.getRoom(roomId)
@@ -587,7 +589,6 @@ class GameEngine(
         for (run in 1..runCount) {
             // Оповещаем клиент, что начинается новый прогон
             gameRoomService.broadcast(roomId, OutgoingMessage.StartBoardRun(run, runCount))
-            //delay(1000L)
 
             val currentRunCommunityCards = initialCommunityCards.toMutableList()
             var isFirst = true
@@ -596,9 +597,10 @@ class GameEngine(
             for (cardsToDeal in cardsNeededPerStreet) {
                 // Считаем и отправляем эквити для текущего состояния
                 if(isFirst) isFirst = false
-                else calculateAndBroadcastEquity(currentRunCommunityCards, run)
-
-                //delay(2000L)
+                else {
+                    calculateAndBroadcastEquity(currentRunCommunityCards, run)
+                    delay(2000)
+                }
 
                 // Раздаем карты для следующей улицы
                 currentRunCommunityCards.addAll(deck.deal(cardsToDeal))
@@ -614,11 +616,11 @@ class GameEngine(
                     runIndex = run
                 )
                 gameRoomService.broadcast(roomId, OutgoingMessage.GameStateUpdate(tempGameState))
-                //delay(2000L)
             }
 
             // Финальное эквити, когда уже 5 карт на столе
             calculateAndBroadcastEquity(currentRunCommunityCards, run)
+            delay(2000)
 
             // Определяем победителя для этой доски
             val hands = contenders.map { ps -> ps.player.userId to HandEvaluator.evaluate(ps.cards + currentRunCommunityCards) }
@@ -635,7 +637,7 @@ class GameEngine(
         // После распределения всех банков проверяем, не выбыл ли кто-то
         checkForSpectators()
 
-        delay(10000L)
+        delay(7000L)
         startNewHand()
     }
 
@@ -714,18 +716,35 @@ class GameEngine(
 
         // Расчет аутов для андердогов
         val topEquityPlayerId = equitiesMap.maxByOrNull { it.value }?.key
+        val underdogs = contenders.filter { it.player.userId != topEquityPlayerId }
+
         val outsMap = mutableMapOf<String, OutsInfo>()
-        // Если на столе нет карт (префлоп), аутов быть не может.
-        if (topEquityPlayerId != null && communityCards.isNotEmpty()) {
-            contenders.filter { it.player.userId != topEquityPlayerId }.forEach { underdog ->
-                val opponentHands = contenders.filter { it.player.userId != underdog.player.userId }.map { it.cards }
-                val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, communityCards)
-                outsMap[underdog.player.userId] = when {
-                    directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
-                    hasIndirectOuts -> OutsInfo.RunnerRunner
-                    else -> OutsInfo.DrawingDead
+
+        // coroutineScope гарантирует, что мы дождемся завершения всех запущенных в нем задач
+        coroutineScope {
+            // 1. Создаем список асинхронных задач для каждого андердога
+            val outsJobs = underdogs.map { underdog ->
+                async {
+                    val opponentHands = contenders
+                        .filter { it.player.userId != underdog.player.userId }
+                        .map { it.cards }
+
+                    // Выполняем тяжелый расчет
+                    val (directOuts, hasIndirectOuts) = calculateLiveOuts(underdog.cards, opponentHands, communityCards)
+
+                    // Возвращаем пару: ID игрока и результат
+                    underdog.player.userId to when {
+                        directOuts.isNotEmpty() -> OutsInfo.DirectOuts(directOuts)
+                        hasIndirectOuts -> OutsInfo.RunnerRunner
+                        else -> OutsInfo.DrawingDead
+                    }
                 }
             }
+            // 2. Ждем, пока ВСЕ задачи по расчету аутов завершатся
+            val outsResults = outsJobs.awaitAll()
+
+            // 3. Собираем результаты в нашу карту
+            outsMap.putAll(outsResults)
         }
         // Отправка сообщения
         val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap, runIndex)
