@@ -6,6 +6,7 @@ import com.example.domain.model.BlindStructureType
 import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
+import com.example.domain.model.PlayerState
 import com.example.domain.model.PlayerStatus
 import com.example.dto.CreateRoomRequest
 import com.example.dto.ws.OutgoingMessage
@@ -112,6 +113,39 @@ class GameRoomService : CoroutineScope {
         launch { broadcastLobbyUpdate() } // Оповещаем лобби, что комната могла удалиться или состав изменился
     }
 
+    suspend fun updatePlayerStatus(roomId: String, userId: String, newStatus: PlayerStatus, newStack: Long) {
+        val room = rooms[roomId] ?: return
+
+        // Находим и обновляем нужного игрока в списке
+        val updatedPlayers = room.players.map { player ->
+            if (player.userId == userId) {
+                player.copy(status = newStatus, stack = newStack, isReady = false) // Сбрасываем готовность
+            } else {
+                player
+            }
+        }
+
+        // Обновляем комнату в нашем хранилище
+        rooms[roomId] = room.copy(players = updatedPlayers)
+
+        // Рассылаем всем в комнате сообщение об изменении статуса
+        broadcast(roomId, OutgoingMessage.PlayerStatusUpdate(userId, newStatus, newStack))
+    }
+
+    fun updatePlayerStatesInRoom(roomId: String, finalPlayerStates: List<PlayerState>) {
+        val room = rooms[roomId] ?: return
+
+        // Создаем Map для быстрого доступа к финальным стекам и статусам
+        val finalStatesMap = finalPlayerStates.associateBy { it.player.userId }
+
+        // Обновляем "главный" список игроков в комнате
+        val updatedPlayers = room.players.map { player ->
+            finalStatesMap[player.userId]?.player ?: player
+        }
+
+        rooms[roomId] = room.copy(players = updatedPlayers)
+    }
+
     suspend fun handleSitAtTable(roomId: String, userId: String, buyIn: Long) {
         val room = rooms[roomId] ?: return
         var targetPlayer: Player? = null
@@ -156,7 +190,7 @@ class GameRoomService : CoroutineScope {
         val room = rooms[roomId] ?: return
         val updatedPlayers = room.players.map { if (it.userId == userId) it.copy(
             isReady = isReady,
-            status = if (isReady) PlayerStatus.IN_HAND else PlayerStatus.SITTING_OUT
+            status = if (it.status == PlayerStatus.SPECTATING) it.status else PlayerStatus.SITTING_OUT
         ) else it }
         val updatedRoom = room.copy(players = updatedPlayers)
         rooms[roomId] = updatedRoom
@@ -164,9 +198,17 @@ class GameRoomService : CoroutineScope {
         // Оповещаем всех об изменении статуса
         broadcast(roomId, OutgoingMessage.PlayerReadyUpdate(userId, isReady))
 
-        // Проверяем, не пора ли начинать игру
-        val activePlayers = updatedRoom.players
-        if (activePlayers.size >= 2 && activePlayers.all { it.isReady }) {
+        // 1. Фильтруем игроков, чтобы остались только те, кто за столом
+        val playersAtTable = updatedRoom.players.filter { it.status != PlayerStatus.SPECTATING }
+
+        // 2. Проверяем, что за столом достаточно игроков и ВСЕ ОНИ готовы
+        if (playersAtTable.size >= 2 && playersAtTable.all { it.isReady }) {
+            // Устанавливаем статус IN_HAND для всех, кто готов и сидит за столом
+            val finalPlayers = updatedRoom.players.map {
+                if(it.status != PlayerStatus.SPECTATING && it.isReady) it.copy(status = PlayerStatus.IN_HAND) else it
+            }
+            rooms[roomId] = updatedRoom.copy(players = finalPlayers)
+
             engines[roomId]?.startGame()
         }
     }
