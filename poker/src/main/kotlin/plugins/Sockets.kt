@@ -84,9 +84,11 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                     println(e.localizedMessage)
                 } finally {
                     // При отключении (или ошибке) удаляем сессию и оповещаем остальных
-                    gameRoomService.onLeave(roomId, userId)
-                    val playerLeftMessage = OutgoingMessage.PlayerLeft(player.userId)
-                    gameRoomService.broadcast(roomId, playerLeftMessage)
+                    //gameRoomService.onLeave(roomId, userId)
+                    //val playerLeftMessage = OutgoingMessage.PlayerLeft(player.userId)
+                    //gameRoomService.broadcast(roomId, playerLeftMessage)
+                    // Больше не удаляем игрока из комнаты, а просто регистрируем обрыв связи
+                    gameRoomService.onPlayerDisconnected(roomId, userId)
                 }
             }
         }

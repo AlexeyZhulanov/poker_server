@@ -14,7 +14,9 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.util.UUID
@@ -30,6 +32,8 @@ class GameRoomService : CoroutineScope {
     private val members = ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>>()
     private val engines = ConcurrentHashMap<String, GameEngine>()
     private val lobbySubscribers = ConcurrentHashMap<String, WebSocketSession>()
+    private val reconnectionTimers = ConcurrentHashMap<String, Job>()
+    private val playerLocations = ConcurrentHashMap<String, String>()
 
     fun createRoom(request: CreateRoomRequest, owner: Player): GameRoom {
         val roomId = UUID.randomUUID().toString()
@@ -74,9 +78,6 @@ class GameRoomService : CoroutineScope {
 
     fun joinRoom(roomId: String, player: Player): GameRoom? {
         val room = rooms[roomId] ?: return null
-        if (room.players.size >= room.maxPlayers) {
-            return null // Комната заполнена
-        }
         if (room.players.any { it.userId == player.userId }) {
             return room // Игрок уже в комнате
         }
@@ -91,11 +92,44 @@ class GameRoomService : CoroutineScope {
     fun onJoin(roomId: String, userId: String, session: WebSocketSession) {
         val roomMembers = members.computeIfAbsent(roomId) { ConcurrentHashMap() }
         roomMembers[userId] = session
+        playerLocations[userId] = roomId
+        // Если для этого игрока был запущен таймер, отменяем его
+        reconnectionTimers[userId]?.cancel()
+        reconnectionTimers.remove(userId)
     }
 
-    fun onLeave(roomId: String, userId: String) {
+    fun onPlayerDisconnected(roomId: String, userId: String) {
+        members[roomId]?.remove(userId)
+        // Запускаем таймер на 30 секунд. Если игрок не вернется, он будет удален из комнаты.
+        val job = launch {
+            println("Player $userId disconnected. Starting 30s reconnect timer...")
+            delay(30_000L)
+            println("Player $userId reconnect timer expired. Removing from room.")
+            onLeave(roomId, userId) // Вызываем полный выход по истечении таймера
+        }
+        reconnectionTimers[userId] = job
+    }
+
+    fun incrementMissedTurns(roomId: String, userId: String) {
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map {
+            if (it.userId == userId) it.copy(missedTurns = it.missedTurns + 1) else it
+        }
+        rooms[roomId] = room.copy(players = updatedPlayers)
+    }
+
+    fun resetMissedTurns(roomId: String, userId: String) {
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map {
+            if (it.userId == userId) it.copy(missedTurns = 0) else it
+        }
+        rooms[roomId] = room.copy(players = updatedPlayers)
+    }
+
+    private fun onLeave(roomId: String, userId: String) {
         val roomMembers = members[roomId]
         roomMembers?.remove(userId)
+        playerLocations.remove(userId)
 
         val room = rooms[roomId] ?: return
         val players = room.players.toMutableList()
@@ -148,6 +182,14 @@ class GameRoomService : CoroutineScope {
 
     suspend fun handleSitAtTable(roomId: String, userId: String, buyIn: Long) {
         val room = rooms[roomId] ?: return
+
+        val playersAtTable = room.players.count { it.status != PlayerStatus.SPECTATING }
+        if (playersAtTable >= room.maxPlayers) {
+            // Мест нет, отправляем ошибку
+            sendToPlayer(roomId, userId, OutgoingMessage.ErrorMessage("The table is full."))
+            return
+        }
+
         var targetPlayer: Player? = null
 
         // Обновляем список игроков, меняя статус и стек нужного игрока
@@ -238,6 +280,15 @@ class GameRoomService : CoroutineScope {
     }
 
     fun onLobbyJoin(userId: String, session: WebSocketSession) {
+        // Проверяем, был ли игрок в какой-то комнате
+        val previousRoomId = playerLocations[userId]
+        if (previousRoomId != null) {
+            // Если был, то немедленно удаляем его из той комнаты
+            println("Player $userId connected to lobby, removing from room $previousRoomId")
+            reconnectionTimers[userId]?.cancel()
+            reconnectionTimers.remove(userId)
+            onLeave(previousRoomId, userId)
+        }
         lobbySubscribers[userId] = session
     }
 

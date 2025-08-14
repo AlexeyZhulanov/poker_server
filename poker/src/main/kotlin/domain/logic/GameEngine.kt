@@ -29,6 +29,8 @@ class GameEngine(
     private var playersInGame: List<Player> = emptyList()
     private var runItState = RunItState.NONE
     private var runItOffer: RunItOffer? = null
+    private var turnTimerJob: Job? = null
+    private var isGameStarted: Boolean = false
 
     init {
         val room = gameRoomService.getRoom(roomId)
@@ -71,14 +73,34 @@ class GameEngine(
     }
 
     fun startGame() {
+        isGameStarted = true
         startNewHand()
     }
 
     fun startNewHand() {
-        val room = gameRoomService.getRoom(roomId) ?: return // Если комната уже не существует, выходим
+        var room = gameRoomService.getRoom(roomId) ?: return // Если комната уже не существует, выходим
+
+        // Находим игроков, которые пропустили 3 и более ходов подряд
+        val inactivePlayers = room.players.filter { it.missedTurns >= 3 }
+        if (inactivePlayers.isNotEmpty()) {
+            // Переводим их в зрители
+            inactivePlayers.forEach { playerToKick ->
+                launch {
+                    gameRoomService.updatePlayerStatus(
+                        roomId = roomId,
+                        userId = playerToKick.userId,
+                        newStatus = PlayerStatus.SPECTATING,
+                        newStack = playerToKick.stack // Стек сохраняется
+                    )
+                }
+            }
+            // Запрашиваем обновленное состояние комнаты после изменений
+            room = gameRoomService.getRoom(roomId) ?: return
+        }
 
         if (room.players.size < 2) {
             println("EXIT < 2 players")
+            isGameStarted = false
             gameState = GameState(roomId = roomId)
             val message = OutgoingMessage.GameStateUpdate(null)
             launch { gameRoomService.sendToPlayer(roomId, room.players.first().userId, message) }
@@ -92,6 +114,7 @@ class GameEngine(
 
         // 2. Проверяем, не закончился ли турнир
         if (playersInGame.size < 2) {
+            isGameStarted = false
             if(room.gameMode == GameMode.TOURNAMENT) {
                 val winnerUsername = playersInGame.firstOrNull()?.username ?: "Unknown"
                 // Отправляем всем сообщение о победителе
@@ -178,12 +201,16 @@ class GameEngine(
 
     //--- Обработка действий игрока ---
 
-    fun processFold(userId: String) {
+    fun processFold(userId: String, isAutoClick: Boolean = false) {
+        turnTimerJob?.cancel()
+        if(!isAutoClick) gameRoomService.resetMissedTurns(roomId, userId)
         updatePlayerState(userId) { it.copy(hasFolded = true, hasActedThisRound = true) }
         findNextPlayerOrEndRound()
     }
 
-    fun processCheck(userId: String) {
+    fun processCheck(userId: String, isAutoClick: Boolean = false) {
+        turnTimerJob?.cancel()
+        if(!isAutoClick) gameRoomService.resetMissedTurns(roomId, userId)
         val playerState = getPlayerState(userId) ?: return
         if (playerState.currentBet < gameState.amountToCall) {
             println("Cannot check")
@@ -195,6 +222,7 @@ class GameEngine(
     }
 
     fun processCall(userId: String) {
+        turnTimerJob?.cancel()
         val playerState = getPlayerState(userId) ?: return
         val amountToCall = minOf(playerState.player.stack, gameState.amountToCall - playerState.currentBet)
 
@@ -213,6 +241,7 @@ class GameEngine(
     }
 
     fun processBet(userId: String, amount: Long) {
+        turnTimerJob?.cancel()
         val playerState = getPlayerState(userId) ?: return
         // Проверка, достаточно ли фишек у игрока
         if (amount > (playerState.player.stack + playerState.currentBet)) {
@@ -324,12 +353,38 @@ class GameEngine(
     }
 
     private fun advanceToNextActivePlayer() {
+        turnTimerJob?.cancel() // Отменяем старый таймер
+
         var nextPos = (gameState.activePlayerPosition + 1) % playersInGame.size
         while (gameState.playerStates[nextPos].hasFolded || gameState.playerStates[nextPos].isAllIn) {
             nextPos = (nextPos + 1) % playersInGame.size
         }
         gameState = gameState.copy(activePlayerPosition = nextPos)
+
+        // Запускаем новый таймер на 15 секунд для нового игрока
+        turnTimerJob = launch {
+            delay(15_000L)
+            handlePlayerTimeout()
+        }
+
         launch { broadcastGameState() }
+    }
+
+    private fun handlePlayerTimeout() {
+        val timedOutPlayerState = gameState.playerStates.getOrNull(gameState.activePlayerPosition) ?: return
+        val userId = timedOutPlayerState.player.userId
+
+        // Увеличиваем счетчик пропущенных ходов
+        gameRoomService.incrementMissedTurns(roomId, userId)
+
+        // Определяем, можно ли сделать "чек"
+        val canCheck = timedOutPlayerState.currentBet >= gameState.amountToCall
+
+        if (canCheck) {
+            processCheck(timedOutPlayerState.player.userId, isAutoClick = true)
+        } else {
+            processFold(timedOutPlayerState.player.userId, isAutoClick = true)
+        }
     }
 
     private fun clearHasActedFlags(exceptForUserId: String? = null, keepForThoseWhoBet: Long? = null) {
@@ -489,6 +544,29 @@ class GameEngine(
         job.cancel()
     }
 
+    fun getPersonalizedGameStateFor(userId: String): GameState? {
+        if(!isGameStarted) return null
+
+        val publicGameState = gameState.copy(
+            playerStates = gameState.playerStates.map { it.copy(cards = emptyList()) }
+        )
+        val playerStateInHand = gameState.playerStates.find { it.player.userId == userId }
+        return if (playerStateInHand != null) {
+            val personalizedState = gameState.copy(
+                playerStates = gameState.playerStates.map { otherPlayerState ->
+                    val shouldHideCards = otherPlayerState.hasFolded ||
+                            (otherPlayerState.player.userId != userId && gameState.stage != GameStage.SHOWDOWN)
+                    if (shouldHideCards) {
+                        otherPlayerState.copy(cards = emptyList())
+                    } else {
+                        otherPlayerState
+                    }
+                }
+            )
+            personalizedState
+        } else publicGameState
+    }
+
     private suspend fun broadcastGameState(forceRevealCards: Boolean = false) {
         // 1. Получаем ПОЛНЫЙ список всех, кто в комнате (игроки + зрители)
         val room = gameRoomService.getRoom(roomId) ?: return
@@ -543,6 +621,12 @@ class GameEngine(
                 // Если турнир, то крутим один раз
                 executeMultiRunShowdown(1); return@launch
             }
+
+            if(gameState.stage == GameStage.RIVER) {
+                // Если нам не нужно выбирать количество круток, то сразу крутим один раз
+                executeMultiRunShowdown(1); return@launch
+            }
+            
             val equityPlayersHands = activePlayers.map { it.cards }
             val equityResult = calculateEquity(equityPlayersHands, gameState.communityCards)
             val equitiesMap = activePlayers.mapIndexed { index, ps -> ps.player.userId to equityResult.wins[index] }.toMap()
