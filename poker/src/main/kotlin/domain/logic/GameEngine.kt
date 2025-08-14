@@ -31,6 +31,7 @@ class GameEngine(
     private var runItOffer: RunItOffer? = null
     private var turnTimerJob: Job? = null
     private var isGameStarted: Boolean = false
+    private var lastBigBlindAmount: Long = 0L
 
     init {
         val room = gameRoomService.getRoom(roomId)
@@ -150,6 +151,7 @@ class GameEngine(
         val smallBlindAmount = currentLevel.smallBlind
         val bigBlindAmount = currentLevel.bigBlind
         val anteAmount = currentLevel.ante
+        lastBigBlindAmount = bigBlindAmount
 
         // 4. Двигаем дилера и блайнды
         currentDealerPosition = (currentDealerPosition + 1) % playersInGame.size
@@ -223,6 +225,7 @@ class GameEngine(
 
     fun processCall(userId: String) {
         turnTimerJob?.cancel()
+        gameRoomService.resetMissedTurns(roomId, userId)
         val playerState = getPlayerState(userId) ?: return
         val amountToCall = minOf(playerState.player.stack, gameState.amountToCall - playerState.currentBet)
 
@@ -242,6 +245,7 @@ class GameEngine(
 
     fun processBet(userId: String, amount: Long) {
         turnTimerJob?.cancel()
+        gameRoomService.resetMissedTurns(roomId, userId)
         val playerState = getPlayerState(userId) ?: return
         // Проверка, достаточно ли фишек у игрока
         if (amount > (playerState.player.stack + playerState.currentBet)) {
@@ -280,9 +284,12 @@ class GameEngine(
             )
         }
 
+        val newLastRaiseAmount = if(amount > gameState.amountToCall) amount - gameState.amountToCall else gameState.lastRaiseAmount
+
         gameState = gameState.copy(
             pot = gameState.pot + contribution,
-            amountToCall = amount
+            amountToCall = amount,
+            lastRaiseAmount = newLastRaiseAmount
         )
         findNextPlayerOrEndRound()
     }
@@ -420,7 +427,7 @@ class GameEngine(
         gameState = gameState.copy(
             playerStates = newPlayerStates,
             amountToCall = 0,
-            lastRaiseAmount = 0,
+            lastRaiseAmount = lastBigBlindAmount,
             lastAggressorPosition = nextAggressor
         )
         roundIsOver = false
