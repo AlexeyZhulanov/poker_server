@@ -29,6 +29,8 @@ class GameEngine(
     private var playersInGame: List<Player> = emptyList()
     private var runItState = RunItState.NONE
     private var runItOffer: RunItOffer? = null
+    private var turnTimerJob: Job? = null
+    private var isGameStarted: Boolean = false
 
     init {
         val room = gameRoomService.getRoom(roomId)
@@ -71,14 +73,34 @@ class GameEngine(
     }
 
     fun startGame() {
+        isGameStarted = true
         startNewHand()
     }
 
     fun startNewHand() {
-        val room = gameRoomService.getRoom(roomId) ?: return // Если комната уже не существует, выходим
+        var room = gameRoomService.getRoom(roomId) ?: return // Если комната уже не существует, выходим
+
+        // Находим игроков, которые пропустили 3 и более ходов подряд
+        val inactivePlayers = room.players.filter { it.missedTurns >= 3 }
+        if (inactivePlayers.isNotEmpty()) {
+            // Переводим их в зрители
+            inactivePlayers.forEach { playerToKick ->
+                launch {
+                    gameRoomService.updatePlayerStatus(
+                        roomId = roomId,
+                        userId = playerToKick.userId,
+                        newStatus = PlayerStatus.SPECTATING,
+                        newStack = playerToKick.stack // Стек сохраняется
+                    )
+                }
+            }
+            // Запрашиваем обновленное состояние комнаты после изменений
+            room = gameRoomService.getRoom(roomId) ?: return
+        }
 
         if (room.players.size < 2) {
             println("EXIT < 2 players")
+            isGameStarted = false
             gameState = GameState(roomId = roomId)
             val message = OutgoingMessage.GameStateUpdate(null)
             launch { gameRoomService.sendToPlayer(roomId, room.players.first().userId, message) }
@@ -87,17 +109,12 @@ class GameEngine(
             return
         }
 
-        // 1. Определяем игроков для новой раздачи (у кого есть стек)
-        playersInGame = if (gameState.playerStates.isEmpty()) {
-            // Первая раздача, берем всех из комнаты
-            room.players.filter { it.status == PlayerStatus.IN_HAND }
-        } else {
-            // Последующие раздачи, фильтруем тех, у кого остались фишки
-            gameState.playerStates.filter { it.player.stack > 0 }.map { it.player }
-        }
+        // 1. Определяем игроков для новой раздачи
+        playersInGame = room.players.filter { it.status != PlayerStatus.SPECTATING }
 
         // 2. Проверяем, не закончился ли турнир
         if (playersInGame.size < 2) {
+            isGameStarted = false
             if(room.gameMode == GameMode.TOURNAMENT) {
                 val winnerUsername = playersInGame.firstOrNull()?.username ?: "Unknown"
                 // Отправляем всем сообщение о победителе
@@ -154,7 +171,10 @@ class GameEngine(
             potFromBlindsAndAntes += totalContribution
 
             PlayerState(
-                player = player.copy(stack = player.stack - totalContribution),
+                player = player.copy(
+                    stack = player.stack - totalContribution,
+                    status = PlayerStatus.IN_HAND
+                ),
                 cards = deck.deal(2),
                 currentBet = totalBet, // Анте идет сразу в банк, не считается частью ставки
                 handContribution = totalContribution,
@@ -181,12 +201,16 @@ class GameEngine(
 
     //--- Обработка действий игрока ---
 
-    fun processFold(userId: String) {
+    fun processFold(userId: String, isAutoClick: Boolean = false) {
+        turnTimerJob?.cancel()
+        if(!isAutoClick) gameRoomService.resetMissedTurns(roomId, userId)
         updatePlayerState(userId) { it.copy(hasFolded = true, hasActedThisRound = true) }
         findNextPlayerOrEndRound()
     }
 
-    fun processCheck(userId: String) {
+    fun processCheck(userId: String, isAutoClick: Boolean = false) {
+        turnTimerJob?.cancel()
+        if(!isAutoClick) gameRoomService.resetMissedTurns(roomId, userId)
         val playerState = getPlayerState(userId) ?: return
         if (playerState.currentBet < gameState.amountToCall) {
             println("Cannot check")
@@ -198,6 +222,7 @@ class GameEngine(
     }
 
     fun processCall(userId: String) {
+        turnTimerJob?.cancel()
         val playerState = getPlayerState(userId) ?: return
         val amountToCall = minOf(playerState.player.stack, gameState.amountToCall - playerState.currentBet)
 
@@ -216,6 +241,7 @@ class GameEngine(
     }
 
     fun processBet(userId: String, amount: Long) {
+        turnTimerJob?.cancel()
         val playerState = getPlayerState(userId) ?: return
         // Проверка, достаточно ли фишек у игрока
         if (amount > (playerState.player.stack + playerState.currentBet)) {
@@ -285,13 +311,13 @@ class GameEngine(
             // Если остался один (или ноль) игроков, раздача окончена.
             val winnerId = activePlayers.firstOrNull()?.player?.userId
             if (winnerId != null) {
-                // Используем наш существующий метод для передачи фишек победителю.
-                distributeWinnings(listOf(winnerId), gameState.pot)
+                givePrize(mapOf(winnerId to gameState.pot))
             }
 
             // Рассылаем финальное состояние, чтобы UI показал, как победитель получил фишки,
             // и запускаем новую раздачу через 3 секунды.
             launch {
+                gameRoomService.updatePlayerStatesInRoom(roomId, gameState.playerStates)
                 broadcastGameState()
                 delay(2000L) // Пауза для просмотра результата
                 startNewHand()
@@ -327,12 +353,38 @@ class GameEngine(
     }
 
     private fun advanceToNextActivePlayer() {
+        turnTimerJob?.cancel() // Отменяем старый таймер
+
         var nextPos = (gameState.activePlayerPosition + 1) % playersInGame.size
         while (gameState.playerStates[nextPos].hasFolded || gameState.playerStates[nextPos].isAllIn) {
             nextPos = (nextPos + 1) % playersInGame.size
         }
         gameState = gameState.copy(activePlayerPosition = nextPos)
+
+        // Запускаем новый таймер на 15 секунд для нового игрока
+        turnTimerJob = launch {
+            delay(15_000L)
+            handlePlayerTimeout()
+        }
+
         launch { broadcastGameState() }
+    }
+
+    private fun handlePlayerTimeout() {
+        val timedOutPlayerState = gameState.playerStates.getOrNull(gameState.activePlayerPosition) ?: return
+        val userId = timedOutPlayerState.player.userId
+
+        // Увеличиваем счетчик пропущенных ходов
+        gameRoomService.incrementMissedTurns(roomId, userId)
+
+        // Определяем, можно ли сделать "чек"
+        val canCheck = timedOutPlayerState.currentBet >= gameState.amountToCall
+
+        if (canCheck) {
+            processCheck(timedOutPlayerState.player.userId, isAutoClick = true)
+        } else {
+            processFold(timedOutPlayerState.player.userId, isAutoClick = true)
+        }
     }
 
     private fun clearHasActedFlags(exceptForUserId: String? = null, keepForThoseWhoBet: Long? = null) {
@@ -412,92 +464,75 @@ class GameEngine(
     private fun handleShowdown() {
         println("SHOWDOWN CALLED")
         launch {
-            // Убедимся, что все ставки на столе включены в общий вклад игроков
-            // Это важно для корректного расчета банков
-            gameState.playerStates.forEach { ps ->
-                updatePlayerState(ps.player.userId) {
-                    it.copy(handContribution = it.handContribution + it.currentBet, currentBet = 0)
+            // Находим претендентов на банк
+            val contendersForPot = gameState.playerStates.filter { !it.hasFolded }
+
+            if (contendersForPot.isEmpty()) return@launch // Никто не претендует, пропускаем
+
+            if (contendersForPot.size == 1) {
+                // Если на банк претендует один, он его и забирает
+                givePrize(mapOf(contendersForPot.first().player.userId to gameState.pot))
+            } else {
+                // Несколько претендентов, оцениваем их руки
+                val hands = contendersForPot.map { playerState ->
+                    playerState.player.userId to HandEvaluator.evaluate(playerState.cards + gameState.communityCards)
                 }
+                calculateWinners(hands, gameState.playerStates)
             }
-
-            // 1. Рассчитываем все банки (основной и побочные)
-            val pots = calculatePots()
-
-            // 2. Итерируем по каждому банку и определяем для него победителя
-            pots.forEach { pot ->
-                // Находим претендентов на этот конкретный банк
-                val contendersForPot = gameState.playerStates
-                    .filter { it.player.userId in pot.eligiblePlayerIds && !it.hasFolded }
-
-                if (contendersForPot.isEmpty()) return@forEach // Никто не претендует, пропускаем
-
-                if (contendersForPot.size == 1) {
-                    // Если на банк претендует один, он его и забирает
-                    distributeWinnings(listOf(contendersForPot.first().player.userId), pot.amount)
-                } else {
-                    // Несколько претендентов, оцениваем их руки
-                    val hands = contendersForPot.map { playerState ->
-                        playerState.player.userId to HandEvaluator.evaluate(playerState.cards + gameState.communityCards)
-                    }
-
-                    val bestRank = hands.maxByOrNull { it.second }?.second
-                    val winners = hands.filter { it.second == bestRank }
-
-                    // Распределяем этот конкретный банк между победителями
-                    distributeWinnings(winners.map { it.first }, pot.amount)
-                }
-            }
-
-            checkForSpectators()
 
             gameState = gameState.copy(stage = GameStage.SHOWDOWN)
-
+            gameRoomService.updatePlayerStatesInRoom(roomId, gameState.playerStates)
+            checkForSpectators()
             broadcastGameState()
             delay(5000L) // задержка перед следующей раздачей
             startNewHand()
         }
     }
 
-    private fun distributeWinnings(winnerIds: List<String>, totalPot: Long) {
-        val prizePerWinner = totalPot / winnerIds.size
-
-        winnerIds.forEach { winnerId ->
-            updatePlayerState(winnerId) { playerState ->
-                playerState.copy(player = playerState.player.copy(stack = playerState.player.stack + prizePerWinner))
+    private fun givePrize(winners: Map<String, Long>) {
+        gameState = gameState.copy(
+            playerStates = gameState.playerStates.map { playerState ->
+                if (playerState.player.userId in winners.keys) {
+                    playerState.copy(
+                        player = playerState.player.copy(stack = playerState.player.stack + (winners[playerState.player.userId] ?: 0L))
+                    )
+                } else playerState
             }
-        }
+        )
     }
 
-    private fun calculatePots(): List<Pot> {
-        val pots = mutableListOf<Pot>()
-        // 1. Собираем информацию о всех, кто не сбросил карты
-        val contenders = gameState.playerStates
-            .filter { !it.hasFolded && it.handContribution > 0 }
-            .sortedBy { it.handContribution } // Сортируем по возрастанию их вклада в банк
+    private fun calculateWinners(list: List<Pair<String, Int>>, playerStates: List<PlayerState>, runCount: Int = 1) {
+        val topRankPlayerIds = list.sortedByDescending { it.second }.groupBy({ it.second }, { it.first }).toList().map { it.second }
+        val contributionsMap = playerStates.associate { it.player.userId to it.handContribution }.toMutableMap()
+        val payments = mutableMapOf<String, Long>()
+        topRankPlayerIds.forEach{ winnerGroup ->
+            // Находим минимальную ставку среди победителей этого уровня
+            val minContributionInGroup = winnerGroup.minOfOrNull { contributionsMap[it] ?: 0L } ?: 0L
 
-        if (contenders.isEmpty()) return emptyList()
+            // Если у этих победителей уже не осталось денег на столе, они не могут больше ничего выиграть.
+            if (minContributionInGroup == 0L) return@forEach // Переходим к следующей группе победителей
 
-        // 2. Создаем список "слоев" ставок
-        val contributionLevels = contenders.map { it.handContribution }.distinct()
-        var lastLevel = 0L
-
-        // 3. Идем по каждому уровню ставок и формируем банки
-        contributionLevels.forEach { level ->
-            val potAmount = (level - lastLevel) * contenders.count { it.handContribution >= level }
-            val eligiblePlayerIds = contenders
-                .filter { it.handContribution >= level }
-                .map { it.player.userId }
-                .toSet()
-
-            pots.add(Pot(potAmount, eligiblePlayerIds))
-            lastLevel = level
-        }
-
-        // Объединяем банки с одинаковым набором претендентов
-        return pots.groupBy { it.eligiblePlayerIds }
-            .map { (ids, potList) ->
-                Pot(potList.sumOf { it.amount }, ids)
+            var currentSidePot = 0L
+            // Собираем побочный банк со всех, у кого еще остались деньги на столе.
+            contributionsMap.keys.forEach { userId ->
+                val playerContribution = contributionsMap[userId] ?: 0L
+                val amountToTake = minOf(playerContribution, minContributionInGroup)
+                if (amountToTake > 0) {
+                    currentSidePot += amountToTake
+                    // Уменьшаем "оставшуюся" ставку игрока
+                    contributionsMap[userId] = playerContribution - amountToTake
+                }
             }
+            // Распределяем собранный побочный банк между победителями этого уровня
+            if (currentSidePot > 0 && winnerGroup.isNotEmpty()) {
+                val prizePerWinner = currentSidePot / winnerGroup.size / runCount
+                winnerGroup.forEach { winnerId ->
+                    payments[winnerId] = (payments[winnerId] ?: 0L) + prizePerWinner
+                }
+            }
+        }
+        println("payments: $payments")
+        givePrize(payments)
     }
 
     /**
@@ -509,25 +544,68 @@ class GameEngine(
         job.cancel()
     }
 
-    private suspend fun broadcastGameState(forceRevealCards: Boolean = false) {
-        // Для каждого игрока в текущей раздаче...
-        gameState.playerStates.forEach { playerState ->
-            // 1. Создаем его персональную версию состояния игры
+    fun getPersonalizedGameStateFor(userId: String): GameState? {
+        if(!isGameStarted) return null
+
+        val publicGameState = gameState.copy(
+            playerStates = gameState.playerStates.map { it.copy(cards = emptyList()) }
+        )
+        val playerStateInHand = gameState.playerStates.find { it.player.userId == userId }
+        return if (playerStateInHand != null) {
             val personalizedState = gameState.copy(
                 playerStates = gameState.playerStates.map { otherPlayerState ->
-                    // Скрываем карты всех, кроме него самого (если не вскрытие)
-                    if (!forceRevealCards && otherPlayerState.player.userId != playerState.player.userId && gameState.stage != GameStage.SHOWDOWN) {
+                    val shouldHideCards = otherPlayerState.hasFolded ||
+                            (otherPlayerState.player.userId != userId && gameState.stage != GameStage.SHOWDOWN)
+                    if (shouldHideCards) {
                         otherPlayerState.copy(cards = emptyList())
                     } else {
                         otherPlayerState
                     }
                 }
             )
-            // 2. Создаем сообщение
-            val message = OutgoingMessage.GameStateUpdate(personalizedState)
+            personalizedState
+        } else publicGameState
+    }
 
-            // 3. Просим GameRoomService отправить это сообщение конкретному игроку
-            gameRoomService.sendToPlayer(roomId, playerState.player.userId, message)
+    private suspend fun broadcastGameState(forceRevealCards: Boolean = false) {
+        // 1. Получаем ПОЛНЫЙ список всех, кто в комнате (игроки + зрители)
+        val room = gameRoomService.getRoom(roomId) ?: return
+        val allPlayersInRoom = room.players
+
+        // 2. Создаем "публичную" версию состояния, где все карты скрыты
+        val publicGameState = gameState.copy(
+            playerStates = gameState.playerStates.map { it.copy(cards = emptyList()) }
+        )
+        val publicMessage = OutgoingMessage.GameStateUpdate(publicGameState)
+
+        // 3. Рассылаем сообщения
+        allPlayersInRoom.forEach { player ->
+            // Ищем, участвует ли этот игрок в текущей раздаче
+            val playerStateInHand = gameState.playerStates.find { it.player.userId == player.userId }
+
+            if (playerStateInHand != null) {
+                // Если это игрок в раздаче - отправляем ему персональное состояние
+                val personalizedState = gameState.copy(
+                    playerStates = gameState.playerStates.map { otherPlayerState ->
+                        // Условие, при котором мы скрываем карты другого игрока:
+                        val shouldHideCards =
+                            // 1. Если игрок сбросил карты
+                            otherPlayerState.hasFolded ||
+                            // 2. ИЛИ если это не принудительное вскрытие, И это не наши карты, И это не шоудаун
+                            (!forceRevealCards && otherPlayerState.player.userId != player.userId && gameState.stage != GameStage.SHOWDOWN)
+                        if (shouldHideCards) {
+                            otherPlayerState.copy(cards = emptyList())
+                        } else {
+                            otherPlayerState
+                        }
+                    }
+                )
+                val personalizedMessage = OutgoingMessage.GameStateUpdate(personalizedState)
+                gameRoomService.sendToPlayer(roomId, player.userId, personalizedMessage)
+            } else {
+                // Если это зритель - отправляем ему публичное состояние
+                gameRoomService.sendToPlayer(roomId, player.userId, publicMessage)
+            }
         }
     }
 
@@ -537,7 +615,6 @@ class GameEngine(
             println("----RUN MULTIPLE CALLED----")
             calculateAndBroadcastEquity(gameState.communityCards, 1)
             val activePlayers = gameState.playerStates.filter { !it.hasFolded }
-            val playersInAllIn = activePlayers.filter { it.isAllIn }
             val room = gameRoomService.getRoom(roomId)
 
             if (room?.gameMode != GameMode.CASH) {
@@ -545,12 +622,20 @@ class GameEngine(
                 executeMultiRunShowdown(1); return@launch
             }
 
-            val underdog = playersInAllIn.minByOrNull { it.handContribution }
-            if (underdog == null) {
+            if(gameState.stage == GameStage.RIVER) {
+                // Если нам не нужно выбирать количество круток, то сразу крутим один раз
+                executeMultiRunShowdown(1); return@launch
+            }
+            
+            val equityPlayersHands = activePlayers.map { it.cards }
+            val equityResult = calculateEquity(equityPlayersHands, gameState.communityCards)
+            val equitiesMap = activePlayers.mapIndexed { index, ps -> ps.player.userId to equityResult.wins[index] }.toMap()
+
+            val underdogId = equitiesMap.minByOrNull { it.value }?.key
+            if (underdogId == null) {
                 // Если по какой-то причине не нашли (хотя не должны), просто крутим один раз
                 executeMultiRunShowdown(1); return@launch
             }
-            val underdogId = underdog.player.userId
             val contenderIds = activePlayers.map { it.player.userId }.toSet()
             val favoriteIds = contenderIds - underdogId
 
@@ -564,13 +649,30 @@ class GameEngine(
     }
 
     private suspend fun executeMultiRunShowdown(runCount: Int) {
+        // Возвращаем разницу игроку с максимальным стеком
+        val contributions = gameState.playerStates.map { it.player.userId to it.handContribution }.sortedByDescending { it.second }
+        val topPlayerId = contributions[0].first
+        val diff = contributions[0].second - contributions[1].second
+        givePrize(mapOf(topPlayerId to diff))
+        gameState = gameState.copy(
+            playerStates = gameState.playerStates.map {
+                if (it.player.userId == topPlayerId) {
+                    it.copy(
+                        handContribution = it.handContribution - diff,
+                        currentBet = it.currentBet - diff
+                    )
+                } else {
+                    it
+                }
+            }
+        )
+
         val contenders = gameState.playerStates.filter { !it.hasFolded }
         val initialCommunityCards = gameState.communityCards
 
         val cardsNeededPerStreet = listOf(3, 1, 1).drop(initialCommunityCards.size.takeIf { it > 0 }?.let { if (it < 3) 1 else it - 2 } ?: 0)
 
         val boardResults = mutableListOf<BoardResult>()
-        val potPerRun = gameState.pot / runCount
 
         // --- ГЛАВНЫЙ ЦИКЛ ПО ПРОГОНАМ ДОСОК ---
         for (run in 1..runCount) {
@@ -609,39 +711,31 @@ class GameEngine(
             val bestRank = hands.maxByOrNull { it.second }?.second
             val winners = hands.filter { it.second == bestRank }.map { (userId, _) -> getPlayerState(userId)!!.player.username }
 
+            calculateWinners(hands, gameState.playerStates, runCount)
             boardResults.add(BoardResult(currentRunCommunityCards, winners))
-            distributeWinnings(winners.map { username -> contenders.find { it.player.username == username }!!.player.userId }, potPerRun)
         }
 
         // Отправляем итоговый результат со всеми досками
         gameRoomService.broadcast(roomId, OutgoingMessage.RunItMultipleTimesResult(boardResults))
 
         // После распределения всех банков проверяем, не выбыл ли кто-то
+        gameRoomService.updatePlayerStatesInRoom(roomId, gameState.playerStates)
         checkForSpectators()
-
         delay(5000L)
         startNewHand()
     }
 
     private suspend fun checkForSpectators() {
-        val updatedPlayerStates = gameState.playerStates.map { playerState ->
-            if (playerState.player.stack <= 0 && !playerState.hasFolded) {
-                // Игрок проиграл все фишки, меняем его статус
-                playerState.copy(
-                    player = playerState.player.copy(status = PlayerStatus.SPECTATING)
-                )
-            } else {
-                playerState
-            }
-        }
-        gameState = gameState.copy(playerStates = updatedPlayerStates)
-
-        // Оповещаем всех об изменении статусов выбывших игроков
-        updatedPlayerStates.forEach { ps ->
-            if (ps.player.status == PlayerStatus.SPECTATING) {
-                gameRoomService.broadcast(
-                    roomId,
-                    OutgoingMessage.PlayerStatusUpdate(ps.player.userId, PlayerStatus.SPECTATING, 0)
+        // Находим всех игроков, которые выбыли в этой раздаче
+        val bustedPlayers = gameState.playerStates.filter { it.player.stack <= 0 && it.player.status != PlayerStatus.SPECTATING }
+        if (bustedPlayers.isNotEmpty()) {
+            // Для каждого выбывшего игрока вызываем метод сервиса
+            bustedPlayers.forEach { bustedPlayerState ->
+                gameRoomService.updatePlayerStatus(
+                    roomId = roomId,
+                    userId = bustedPlayerState.player.userId,
+                    newStatus = PlayerStatus.SPECTATING,
+                    newStack = 0
                 )
             }
         }

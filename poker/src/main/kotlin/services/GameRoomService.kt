@@ -6,6 +6,7 @@ import com.example.domain.model.BlindStructureType
 import com.example.domain.model.GameMode
 import com.example.domain.model.GameRoom
 import com.example.domain.model.Player
+import com.example.domain.model.PlayerState
 import com.example.domain.model.PlayerStatus
 import com.example.dto.CreateRoomRequest
 import com.example.dto.ws.OutgoingMessage
@@ -13,7 +14,9 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import java.util.UUID
@@ -29,6 +32,8 @@ class GameRoomService : CoroutineScope {
     private val members = ConcurrentHashMap<String, ConcurrentHashMap<String, WebSocketSession>>()
     private val engines = ConcurrentHashMap<String, GameEngine>()
     private val lobbySubscribers = ConcurrentHashMap<String, WebSocketSession>()
+    private val reconnectionTimers = ConcurrentHashMap<String, Job>()
+    private val playerLocations = ConcurrentHashMap<String, String>()
 
     fun createRoom(request: CreateRoomRequest, owner: Player): GameRoom {
         val roomId = UUID.randomUUID().toString()
@@ -73,9 +78,6 @@ class GameRoomService : CoroutineScope {
 
     fun joinRoom(roomId: String, player: Player): GameRoom? {
         val room = rooms[roomId] ?: return null
-        if (room.players.size >= room.maxPlayers) {
-            return null // Комната заполнена
-        }
         if (room.players.any { it.userId == player.userId }) {
             return room // Игрок уже в комнате
         }
@@ -90,11 +92,44 @@ class GameRoomService : CoroutineScope {
     fun onJoin(roomId: String, userId: String, session: WebSocketSession) {
         val roomMembers = members.computeIfAbsent(roomId) { ConcurrentHashMap() }
         roomMembers[userId] = session
+        playerLocations[userId] = roomId
+        // Если для этого игрока был запущен таймер, отменяем его
+        reconnectionTimers[userId]?.cancel()
+        reconnectionTimers.remove(userId)
     }
 
-    fun onLeave(roomId: String, userId: String) {
+    fun onPlayerDisconnected(roomId: String, userId: String) {
+        members[roomId]?.remove(userId)
+        // Запускаем таймер на 30 секунд. Если игрок не вернется, он будет удален из комнаты.
+        val job = launch {
+            println("Player $userId disconnected. Starting 30s reconnect timer...")
+            delay(30_000L)
+            println("Player $userId reconnect timer expired. Removing from room.")
+            onLeave(roomId, userId) // Вызываем полный выход по истечении таймера
+        }
+        reconnectionTimers[userId] = job
+    }
+
+    fun incrementMissedTurns(roomId: String, userId: String) {
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map {
+            if (it.userId == userId) it.copy(missedTurns = it.missedTurns + 1) else it
+        }
+        rooms[roomId] = room.copy(players = updatedPlayers)
+    }
+
+    fun resetMissedTurns(roomId: String, userId: String) {
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map {
+            if (it.userId == userId) it.copy(missedTurns = 0) else it
+        }
+        rooms[roomId] = room.copy(players = updatedPlayers)
+    }
+
+    private fun onLeave(roomId: String, userId: String) {
         val roomMembers = members[roomId]
         roomMembers?.remove(userId)
+        playerLocations.remove(userId)
 
         val room = rooms[roomId] ?: return
         val players = room.players.toMutableList()
@@ -112,8 +147,49 @@ class GameRoomService : CoroutineScope {
         launch { broadcastLobbyUpdate() } // Оповещаем лобби, что комната могла удалиться или состав изменился
     }
 
+    suspend fun updatePlayerStatus(roomId: String, userId: String, newStatus: PlayerStatus, newStack: Long) {
+        val room = rooms[roomId] ?: return
+
+        // Находим и обновляем нужного игрока в списке
+        val updatedPlayers = room.players.map { player ->
+            if (player.userId == userId) {
+                player.copy(status = newStatus, stack = newStack, isReady = false) // Сбрасываем готовность
+            } else {
+                player
+            }
+        }
+
+        // Обновляем комнату в нашем хранилище
+        rooms[roomId] = room.copy(players = updatedPlayers)
+
+        // Рассылаем всем в комнате сообщение об изменении статуса
+        broadcast(roomId, OutgoingMessage.PlayerStatusUpdate(userId, newStatus, newStack))
+    }
+
+    fun updatePlayerStatesInRoom(roomId: String, finalPlayerStates: List<PlayerState>) {
+        val room = rooms[roomId] ?: return
+
+        // Создаем Map для быстрого доступа к финальным стекам и статусам
+        val finalStatesMap = finalPlayerStates.associateBy { it.player.userId }
+
+        // Обновляем "главный" список игроков в комнате
+        val updatedPlayers = room.players.map { player ->
+            finalStatesMap[player.userId]?.player ?: player
+        }
+
+        rooms[roomId] = room.copy(players = updatedPlayers)
+    }
+
     suspend fun handleSitAtTable(roomId: String, userId: String, buyIn: Long) {
         val room = rooms[roomId] ?: return
+
+        val playersAtTable = room.players.count { it.status != PlayerStatus.SPECTATING }
+        if (playersAtTable >= room.maxPlayers) {
+            // Мест нет, отправляем ошибку
+            sendToPlayer(roomId, userId, OutgoingMessage.ErrorMessage("The table is full."))
+            return
+        }
+
         var targetPlayer: Player? = null
 
         // Обновляем список игроков, меняя статус и стек нужного игрока
@@ -156,7 +232,7 @@ class GameRoomService : CoroutineScope {
         val room = rooms[roomId] ?: return
         val updatedPlayers = room.players.map { if (it.userId == userId) it.copy(
             isReady = isReady,
-            status = if (isReady) PlayerStatus.IN_HAND else PlayerStatus.SITTING_OUT
+            status = if (it.status == PlayerStatus.SPECTATING) it.status else PlayerStatus.SITTING_OUT
         ) else it }
         val updatedRoom = room.copy(players = updatedPlayers)
         rooms[roomId] = updatedRoom
@@ -164,9 +240,17 @@ class GameRoomService : CoroutineScope {
         // Оповещаем всех об изменении статуса
         broadcast(roomId, OutgoingMessage.PlayerReadyUpdate(userId, isReady))
 
-        // Проверяем, не пора ли начинать игру
-        val activePlayers = updatedRoom.players
-        if (activePlayers.size >= 2 && activePlayers.all { it.isReady }) {
+        // 1. Фильтруем игроков, чтобы остались только те, кто за столом
+        val playersAtTable = updatedRoom.players.filter { it.status != PlayerStatus.SPECTATING }
+
+        // 2. Проверяем, что за столом достаточно игроков и ВСЕ ОНИ готовы
+        if (playersAtTable.size >= 2 && playersAtTable.all { it.isReady }) {
+            // Устанавливаем статус IN_HAND для всех, кто готов и сидит за столом
+            val finalPlayers = updatedRoom.players.map {
+                if(it.status != PlayerStatus.SPECTATING && it.isReady) it.copy(status = PlayerStatus.IN_HAND) else it
+            }
+            rooms[roomId] = updatedRoom.copy(players = finalPlayers)
+
             engines[roomId]?.startGame()
         }
     }
@@ -196,6 +280,15 @@ class GameRoomService : CoroutineScope {
     }
 
     fun onLobbyJoin(userId: String, session: WebSocketSession) {
+        // Проверяем, был ли игрок в какой-то комнате
+        val previousRoomId = playerLocations[userId]
+        if (previousRoomId != null) {
+            // Если был, то немедленно удаляем его из той комнаты
+            println("Player $userId connected to lobby, removing from room $previousRoomId")
+            reconnectionTimers[userId]?.cancel()
+            reconnectionTimers.remove(userId)
+            onLeave(previousRoomId, userId)
+        }
         lobbySubscribers[userId] = session
     }
 

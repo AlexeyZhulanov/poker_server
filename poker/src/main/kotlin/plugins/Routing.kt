@@ -16,8 +16,6 @@ import com.example.util.UserAttributeKey
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.*
 import io.ktor.server.auth.authenticate
-import io.ktor.server.auth.jwt.JWTPrincipal
-import io.ktor.server.auth.principal
 import io.ktor.server.request.header
 import io.ktor.server.request.receive
 import io.ktor.server.request.receiveText
@@ -115,7 +113,7 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
 
                     call.respond(HttpStatusCode.OK, AuthResponse(newAccessToken, newRefreshToken))
 
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     // 6. В случае ошибки (невалидный токен) отправляем 401 Unauthorized
                     call.respond(HttpStatusCode.Unauthorized, "Invalid refresh token")
                 }
@@ -172,6 +170,25 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                     } else {
                         call.respond(HttpStatusCode.NotFound)
                     }
+                }
+
+                get("/{roomId}/state") {
+                    val roomId = call.parameters["roomId"] ?: return@get call.respond(HttpStatusCode.BadRequest)
+                    val user = call.attributes[UserAttributeKey]
+
+                    val engine = gameRoomService.getEngine(roomId)
+                    if (engine == null) {
+                        call.respond(HttpStatusCode.NotFound, "Game not active in this room.")
+                        return@get
+                    }
+
+                    // Получаем персонализированное состояние игры для запросившего пользователя
+                    val personalizedState = engine.getPersonalizedGameStateFor(user.id.toString())
+                    if(personalizedState == null) {
+                        call.respond(HttpStatusCode.NotFound, "Game not active in this room.")
+                        return@get
+                    }
+                    call.respond(HttpStatusCode.OK, personalizedState)
                 }
 
                 // Присоединиться к комнате

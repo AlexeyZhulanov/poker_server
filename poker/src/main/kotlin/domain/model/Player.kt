@@ -8,5 +8,6 @@ data class Player(
     val username: String,
     val stack: Long,
     val status: PlayerStatus = PlayerStatus.SPECTATING,
-    val isReady: Boolean = false
+    val isReady: Boolean = false,
+    val missedTurns: Int = 0
 )
