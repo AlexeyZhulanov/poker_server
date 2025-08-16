@@ -96,10 +96,12 @@ class GameRoomService : CoroutineScope {
         // Если для этого игрока был запущен таймер, отменяем его
         reconnectionTimers[userId]?.cancel()
         reconnectionTimers.remove(userId)
+        updatePlayerConnectionStatus(roomId, userId, true)
     }
 
     fun onPlayerDisconnected(roomId: String, userId: String) {
         members[roomId]?.remove(userId)
+        updatePlayerConnectionStatus(roomId, userId, false)
         // Запускаем таймер на 30 секунд. Если игрок не вернется, он будет удален из комнаты.
         val job = launch {
             println("Player $userId disconnected. Starting 30s reconnect timer...")
@@ -108,6 +110,20 @@ class GameRoomService : CoroutineScope {
             onLeave(roomId, userId) // Вызываем полный выход по истечении таймера
         }
         reconnectionTimers[userId] = job
+    }
+
+    private fun updatePlayerConnectionStatus(roomId: String, userId: String, isConnected: Boolean) {
+        val room = rooms[roomId] ?: return
+        val updatedPlayers = room.players.map {
+            if (it.userId == userId) it.copy(isConnected = isConnected) else it
+        }
+        rooms[roomId] = room.copy(players = updatedPlayers)
+        engines[roomId]?.updatePlayerConnectionStatus(userId, isConnected)
+
+        // Рассылаем всем в комнате
+        launch {
+            broadcast(roomId, OutgoingMessage.ConnectionStatusUpdate(userId, isConnected))
+        }
     }
 
     fun incrementMissedTurns(roomId: String, userId: String) {

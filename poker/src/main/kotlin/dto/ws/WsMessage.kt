@@ -64,10 +64,10 @@ sealed interface OutgoingMessage {
     data class RunItMultipleTimesResult(val results: List<BoardResult>) : OutgoingMessage
     @Serializable
     @SerialName("out.run_multiple_offer")
-    data class OfferRunItMultipleTimes(val underdogId: String, val times: Int) : OutgoingMessage
+    data class OfferRunItMultipleTimes(val underdogId: String, val times: Int, val expiresAt: Long) : OutgoingMessage
     @Serializable
     @SerialName("out.run_offer_underdog")
-    data object OfferRunItForUnderdog : OutgoingMessage
+    data class OfferRunItForUnderdog(val expiresAt: Long) : OutgoingMessage
     @Serializable
     @SerialName("out.social_action_broadcast")
     data class SocialActionBroadcast(
@@ -83,6 +83,9 @@ sealed interface OutgoingMessage {
     @Serializable
     @SerialName("out.player_status_update")
     data class PlayerStatusUpdate(val userId: String, val status: PlayerStatus, val stack: Long) : OutgoingMessage
+    @Serializable
+    @SerialName("out.connection_status")
+    data class ConnectionStatusUpdate(val userId: String, val isConnected: Boolean) : OutgoingMessage
 }
 
 // Сообщения, которые клиент отправляет на сервер

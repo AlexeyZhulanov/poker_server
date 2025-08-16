@@ -32,6 +32,7 @@ class GameEngine(
     private var turnTimerJob: Job? = null
     private var isGameStarted: Boolean = false
     private var lastBigBlindAmount: Long = 0L
+    private var runItTimerJob: Job? = null
 
     init {
         val room = gameRoomService.getRoom(roomId)
@@ -177,7 +178,7 @@ class GameEngine(
                     stack = player.stack - totalContribution,
                     status = PlayerStatus.IN_HAND
                 ),
-                cards = deck.deal(2),
+                cards = deck.deal(2).sortedDescending(),
                 currentBet = totalBet, // Анте идет сразу в банк, не считается частью ставки
                 handContribution = totalContribution,
                 hasActedThisRound = false,
@@ -691,7 +692,12 @@ class GameEngine(
             runItState = RunItState.AWAITING_UNDERDOG_CHOICE
 
             // Отсылаем предложение андердогу
-            gameRoomService.sendToPlayer(roomId, underdogId, OutgoingMessage.OfferRunItForUnderdog)
+            gameRoomService.sendToPlayer(roomId, underdogId, OutgoingMessage.OfferRunItForUnderdog(System.currentTimeMillis() + 15_000L))
+            runItTimerJob = launch {
+                delay(15_000L)
+                // Если андердог не ответил, автоматически выбираем "Run it once"
+                processUnderdogRunChoice(underdogId, 1)
+            }
         }
     }
 
@@ -790,6 +796,7 @@ class GameEngine(
     }
 
     fun processUnderdogRunChoice(userId: String, times: Int) {
+        runItTimerJob?.cancel()
         val offer = runItOffer ?: return
         if (runItState != RunItState.AWAITING_UNDERDOG_CHOICE || userId != offer.underdogId) return
 
@@ -798,11 +805,17 @@ class GameEngine(
             runItState = RunItState.AWAITING_FAVORITE_CONFIRMATION
 
             // Отправляем запрос на подтверждение всем остальным
-            val confirmationRequest = OutgoingMessage.OfferRunItMultipleTimes(offer.underdogId, times)
+            val confirmationRequest = OutgoingMessage.OfferRunItMultipleTimes(offer.underdogId, times, System.currentTimeMillis() + 15_000L)
             launch {
                 offer.favoriteIds.forEach { favoriteId ->
                     gameRoomService.sendToPlayer(roomId, favoriteId, confirmationRequest)
                 }
+            }
+            runItTimerJob = launch {
+                delay(15_000L)
+                runItState = RunItState.NONE
+                runItOffer = null
+                launch { executeMultiRunShowdown(1) }
             }
         } else {
             // Андердог выбрал 1 раз, сразу запускаем
@@ -820,6 +833,7 @@ class GameEngine(
 
         // Если все фавориты ответили
         if (offer.favoriteResponses.keys == offer.favoriteIds) {
+            runItTimerJob?.cancel()
             val allAccepted = offer.favoriteResponses.values.all { it }
             val finalRunCount = if (allAccepted) offer.chosenRuns else 1
 
@@ -839,12 +853,14 @@ class GameEngine(
         val equitiesMap = contenders.mapIndexed { index, ps -> ps.player.userId to equityResult.wins[index] }.toMap()
 
         // Расчет аутов для андердогов
-        val topEquityPlayerId = equitiesMap.maxByOrNull { it.value }?.key
-        val underdogs = contenders.filter { it.player.userId != topEquityPlayerId }
+        val sortedEquities = equitiesMap.entries.sortedByDescending { it.value }
+        val topEquity = sortedEquities[0].value
+        val topPlayerIds = sortedEquities.filter { (topEquity - it.value) < 2.0 }.map { it.key }.toSet()
+        val underdogs = contenders.filter { it.player.userId !in topPlayerIds }
 
         val outsMap = mutableMapOf<String, OutsInfo>()
 
-        if (topEquityPlayerId != null && communityCards.isNotEmpty()) {
+        if (topPlayerIds.isNotEmpty() && communityCards.isNotEmpty()) {
             // coroutineScope гарантирует, что мы дождемся завершения всех запущенных в нем задач
             coroutineScope {
                 // 1. Создаем список асинхронных задач для каждого андердога
@@ -872,12 +888,40 @@ class GameEngine(
                 outsMap.putAll(outsResults)
             }
         }
+
+        // Дополнительная проверка на ничью
+        val finalOutsMap = outsMap.toMutableMap()
+        outsMap.forEach { (userId, outsInfo) ->
+            // Если для игрока определен статус "Drawing Dead"...
+            if (outsInfo is OutsInfo.DrawingDead) {
+                val playerEquity = equitiesMap[userId] ?: 0.0
+                // ...но его эквити все еще больше 1%, то это не настоящий "Drawing Dead".
+                // В этом случае мы просто не будем показывать для него информацию об аутах.
+                if (playerEquity > 1.0) {
+                    finalOutsMap.remove(userId)
+                }
+            }
+        }
+
         // Отправка сообщения
-        val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, outsMap, runIndex)
+        val equityMessage = OutgoingMessage.AllInEquityUpdate(equitiesMap, finalOutsMap, runIndex)
         gameRoomService.broadcast(roomId, equityMessage)
     }
 
     fun getCurrentGameState(): GameState = gameState
+
+    fun updatePlayerConnectionStatus(userId: String, isConnected: Boolean) {
+        // Находим игрока в текущем состоянии игры и обновляем его статус
+        val updatedPlayerStates = gameState.playerStates.map {
+            if (it.player.userId == userId) {
+                it.copy(player = it.player.copy(isConnected = isConnected))
+            } else {
+                it
+            }
+        }
+        // Обновляем основной gameState
+        gameState = gameState.copy(playerStates = updatedPlayerStates)
+    }
 
     fun processSocialAction(senderUserId: String, action: SocialAction) {
         val broadcastMessage = OutgoingMessage.SocialActionBroadcast(
