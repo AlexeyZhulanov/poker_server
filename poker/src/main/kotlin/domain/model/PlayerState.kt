@@ -10,5 +10,6 @@ data class PlayerState(
     val handContribution: Long = 0, // Общий вклад в банк за всю раздачу
     val hasFolded: Boolean = false,
     val hasActedThisRound: Boolean = false,
-    val isAllIn: Boolean = false
+    val isAllIn: Boolean = false,
+    val lastAction: PlayerAction? = null
 )

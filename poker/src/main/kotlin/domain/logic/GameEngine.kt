@@ -195,22 +195,45 @@ class GameEngine(
             pot = potFromBlindsAndAntes,
             amountToCall = bigBlindAmount,
             lastRaiseAmount = bigBlindAmount,
-            lastAggressorPosition = bbPos
+            lastAggressorPosition = bbPos,
+            turnExpiresAt = System.currentTimeMillis() + 15_000L,
         )
+
+        // Запускаем таймер на 15 секунд для активного игрока
+        turnTimerJob = launch {
+            delay(15_000L)
+            handlePlayerTimeout()
+        }
+
         // 7. Рассылаем всем обновленное состояние
         launch { broadcastGameState() }
     }
 
     //--- Обработка действий игрока ---
+    private fun isValidProcess(userId: String): Boolean {
+        val activePlayerId = gameState.playerStates.getOrNull(gameState.activePlayerPosition)?.player?.userId
+
+        // Проверка 1: Ход этого игрока?
+        if (activePlayerId != userId) {
+            return false
+        }
+        // Проверка 2: Игра в стадии, когда можно делать ходы?
+        if (gameState.stage == GameStage.SHOWDOWN || runItState != RunItState.NONE) {
+            return false
+        }
+        return true
+    }
 
     fun processFold(userId: String, isAutoClick: Boolean = false) {
+        if(!isValidProcess(userId)) return
         turnTimerJob?.cancel()
         if(!isAutoClick) gameRoomService.resetMissedTurns(roomId, userId)
-        updatePlayerState(userId) { it.copy(hasFolded = true, hasActedThisRound = true) }
+        updatePlayerState(userId) { it.copy(hasFolded = true, hasActedThisRound = true, lastAction = PlayerAction.Fold()) }
         findNextPlayerOrEndRound()
     }
 
     fun processCheck(userId: String, isAutoClick: Boolean = false) {
+        if(!isValidProcess(userId)) return
         turnTimerJob?.cancel()
         if(!isAutoClick) gameRoomService.resetMissedTurns(roomId, userId)
         val playerState = getPlayerState(userId) ?: return
@@ -219,11 +242,12 @@ class GameEngine(
             launch { gameRoomService.sendToPlayer(roomId, userId, OutgoingMessage.ErrorMessage("Cannot check")) }
             return
         }
-        updatePlayerState(userId) { it.copy(hasActedThisRound = true) }
+        updatePlayerState(userId) { it.copy(hasActedThisRound = true, lastAction = PlayerAction.Check()) }
         findNextPlayerOrEndRound()
     }
 
     fun processCall(userId: String) {
+        if(!isValidProcess(userId)) return
         turnTimerJob?.cancel()
         gameRoomService.resetMissedTurns(roomId, userId)
         val playerState = getPlayerState(userId) ?: return
@@ -236,7 +260,8 @@ class GameEngine(
                 currentBet = it.currentBet + amountToCall,
                 handContribution = it.handContribution + amountToCall,
                 hasActedThisRound = true,
-                isAllIn = newStack <= 0
+                isAllIn = newStack <= 0,
+                lastAction = if(newStack <= 0) PlayerAction.AllIn() else PlayerAction.Call(amountToCall)
             )
         }
         gameState = gameState.copy(pot = gameState.pot + amountToCall)
@@ -244,6 +269,7 @@ class GameEngine(
     }
 
     fun processBet(userId: String, amount: Long) {
+        if(!isValidProcess(userId)) return
         turnTimerJob?.cancel()
         gameRoomService.resetMissedTurns(roomId, userId)
         val playerState = getPlayerState(userId) ?: return
@@ -252,7 +278,6 @@ class GameEngine(
             println("Action validation failed: Bet amount ($amount) is larger than stack (${playerState.player.stack}).")
             return // Недостаточно фишек
         }
-
         val maxBetOnStreet = gameState.playerStates.maxOfOrNull { it.currentBet } ?: 0L
         val amountToCall = maxBetOnStreet - playerState.currentBet
 
@@ -274,13 +299,21 @@ class GameEngine(
 
         val contribution = amount - playerState.currentBet
         val newStack = playerState.player.stack - contribution
+        val isRaise = amount > gameState.amountToCall
+        val isAllIn = amount >= playerState.player.stack + playerState.currentBet
+        val lastAction = when {
+            isAllIn -> PlayerAction.AllIn()
+            isRaise -> PlayerAction.Raise(amount)
+            else -> PlayerAction.Bet(amount)
+        }
         updatePlayerState(userId) {
             it.copy(
                 player = it.player.copy(stack = newStack),
                 currentBet = amount,
                 handContribution = it.handContribution + contribution,
                 hasActedThisRound = true,
-                isAllIn = newStack <= 0
+                isAllIn = newStack <= 0,
+                lastAction = lastAction
             )
         }
 
@@ -366,7 +399,10 @@ class GameEngine(
         while (gameState.playerStates[nextPos].hasFolded || gameState.playerStates[nextPos].isAllIn) {
             nextPos = (nextPos + 1) % playersInGame.size
         }
-        gameState = gameState.copy(activePlayerPosition = nextPos)
+        gameState = gameState.copy(
+            activePlayerPosition = nextPos,
+            turnExpiresAt = System.currentTimeMillis() + 15_000L
+        )
 
         // Запускаем новый таймер на 15 секунд для нового игрока
         turnTimerJob = launch {
@@ -421,8 +457,12 @@ class GameEngine(
                 return // Выходим, чтобы не продолжать обычный раунд
             }
         }
-
-        val newPlayerStates = gameState.playerStates.map { it.copy(currentBet = 0, hasActedThisRound = false) }
+        val lastActorId = gameState.playerStates.getOrNull(gameState.activePlayerPosition)?.player?.userId
+        val newPlayerStates = gameState.playerStates.map { it.copy(
+            currentBet = 0,
+            hasActedThisRound = false,
+            lastAction = if (it.player.userId == lastActorId) it.lastAction else null
+        ) }
         val nextAggressor = if (gameState.stage == GameStage.PRE_FLOP) null else gameState.lastAggressorPosition
         gameState = gameState.copy(
             playerStates = newPlayerStates,
@@ -487,7 +527,7 @@ class GameEngine(
                 calculateWinners(hands, gameState.playerStates)
             }
 
-            gameState = gameState.copy(stage = GameStage.SHOWDOWN)
+            gameState = gameState.copy(stage = GameStage.SHOWDOWN, turnExpiresAt = null)
             gameRoomService.updatePlayerStatesInRoom(roomId, gameState.playerStates)
             checkForSpectators()
             broadcastGameState()
@@ -662,6 +702,7 @@ class GameEngine(
         val diff = contributions[0].second - contributions[1].second
         givePrize(mapOf(topPlayerId to diff))
         gameState = gameState.copy(
+            turnExpiresAt = null,
             playerStates = gameState.playerStates.map {
                 if (it.player.userId == topPlayerId) {
                     it.copy(
