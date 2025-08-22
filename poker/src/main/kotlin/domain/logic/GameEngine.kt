@@ -34,16 +34,6 @@ class GameEngine(
     private var lastBigBlindAmount: Long = 0L
     private var runItTimerJob: Job? = null
 
-    init {
-        val room = gameRoomService.getRoom(roomId)
-        // Если это турнир, запускаем таймер
-        if(room != null) {
-            if (room.gameMode == GameMode.TOURNAMENT && room.blindStructureType != null) {
-                startBlindTimer(room.blindStructureType, room)
-            }
-        }
-    }
-
     fun handlePlayerDisconnect(userId: String) {
         // Если игрок был в раздаче, просто считаем, что он сделал фолд
         val playerState = getPlayerState(userId)
@@ -60,22 +50,30 @@ class GameEngine(
         }
         blindIncreaseJob = launch {
             while (isActive) {
-                delay(durationMinutes * 60 * 1000L)
-                currentLevelIndex++
-
                 // Получаем информацию о новом уровне блайндов
                 val newLevel = room.blindStructure?.getOrNull(currentLevelIndex)
                 if (newLevel != null) {
                     // Создаем и рассылаем сообщение
-                    val message = OutgoingMessage.BlindsUp(newLevel.smallBlind, newLevel.bigBlind, newLevel.ante, newLevel.level)
+                    val message = OutgoingMessage.BlindsUp(newLevel.smallBlind, newLevel.bigBlind, newLevel.ante, newLevel.level, System.currentTimeMillis() + durationMinutes * 60 * 1000L)
                     gameRoomService.broadcast(room.roomId, message)
                 }
+                delay(durationMinutes * 60 * 1000L)
+                currentLevelIndex++
             }
         }
     }
 
+    fun getIsStarted(): Boolean = isGameStarted
+
     fun startGame() {
         isGameStarted = true
+        val room = gameRoomService.getRoom(roomId)
+        // Если это турнир, запускаем таймер
+        if(room != null) {
+            if (room.gameMode == GameMode.TOURNAMENT && room.blindStructureType != null) {
+                startBlindTimer(room.blindStructureType, room)
+            }
+        }
         startNewHand()
     }
 
@@ -118,12 +116,12 @@ class GameEngine(
         if (playersInGame.size < 2) {
             isGameStarted = false
             if(room.gameMode == GameMode.TOURNAMENT) {
-                val winnerUsername = playersInGame.firstOrNull()?.username ?: "Unknown"
+                val winnerUserId = playersInGame.firstOrNull()?.userId ?: ""
                 // Отправляем всем сообщение о победителе
                 launch {
-                    gameRoomService.broadcast(room.roomId, OutgoingMessage.TournamentWinner(winnerUsername))
+                    gameRoomService.broadcast(room.roomId, OutgoingMessage.TournamentWinner(winnerUserId))
+                    destroy() // Останавливаем движок
                 }
-                destroy() // Останавливаем движок
                 return
             }
             println("EXIT < 2 gameroom players")
@@ -194,6 +192,7 @@ class GameEngine(
             dealerPosition = currentDealerPosition,
             activePlayerPosition = actionPos,
             pot = potFromBlindsAndAntes,
+            bigBlindAmount = bigBlindAmount,
             amountToCall = bigBlindAmount,
             lastRaiseAmount = bigBlindAmount,
             lastAggressorPosition = bbPos,
@@ -537,7 +536,7 @@ class GameEngine(
         }
     }
 
-    private fun givePrize(winners: Map<String, Long>) {
+    private fun givePrize(winners: Map<String, Long>, isNeedShow: Boolean = true) {
         gameState = gameState.copy(
             playerStates = gameState.playerStates.map { playerState ->
                 if (playerState.player.userId in winners.keys) {
@@ -547,6 +546,10 @@ class GameEngine(
                 } else playerState
             }
         )
+        if(isNeedShow) {
+            val payments = winners.map { it.key to it.value }
+            launch { gameRoomService.broadcast(roomId, OutgoingMessage.BoardResult(payments)) }
+        }
     }
 
     private fun calculateWinners(list: List<Pair<String, Int>>, playerStates: List<PlayerState>, runCount: Int = 1) {
@@ -706,7 +709,7 @@ class GameEngine(
         val contributions = gameState.playerStates.map { it.player.userId to it.handContribution }.sortedByDescending { it.second }
         val topPlayerId = contributions[0].first
         val diff = contributions[0].second - contributions[1].second
-        givePrize(mapOf(topPlayerId to diff))
+        givePrize(mapOf(topPlayerId to diff), isNeedShow = false)
         gameState = gameState.copy(
             turnExpiresAt = null,
             playerStates = gameState.playerStates.map {
@@ -725,9 +728,7 @@ class GameEngine(
         val initialCommunityCards = gameState.communityCards
 
         val cardsNeededPerStreet = listOf(3, 1, 1).drop(initialCommunityCards.size.takeIf { it > 0 }?.let { if (it < 3) 1 else it - 2 } ?: 0)
-
-        val boardResults = mutableListOf<BoardResult>()
-
+        
         // --- ГЛАВНЫЙ ЦИКЛ ПО ПРОГОНАМ ДОСОК ---
         for (run in 1..runCount) {
             // Оповещаем клиент, что начинается новый прогон
@@ -742,7 +743,7 @@ class GameEngine(
                 if(isFirst) isFirst = false
                 else {
                     calculateAndBroadcastEquity(currentRunCommunityCards, run)
-                    delay(3000)
+                    delay(4000)
                 }
 
                 // Раздаем карты для следующей улицы
@@ -758,19 +759,12 @@ class GameEngine(
 
             // Финальное эквити, когда уже 5 карт на столе
             calculateAndBroadcastEquity(currentRunCommunityCards, run)
-            delay(3000)
 
             // Определяем победителя для этой доски
             val hands = contenders.map { ps -> ps.player.userId to HandEvaluator.evaluate(ps.cards + currentRunCommunityCards) }
-            val bestRank = hands.maxByOrNull { it.second }?.second
-            val winners = hands.filter { it.second == bestRank }.map { (userId, _) -> getPlayerState(userId)!!.player.username }
-
             calculateWinners(hands, gameState.playerStates, runCount)
-            boardResults.add(BoardResult(currentRunCommunityCards, winners))
+            delay(4000)
         }
-
-        // Отправляем итоговый результат со всеми досками
-        gameRoomService.broadcast(roomId, OutgoingMessage.RunItMultipleTimesResult(boardResults))
 
         // После распределения всех банков проверяем, не выбыл ли кто-то
         gameRoomService.updatePlayerStatesInRoom(roomId, gameState.playerStates)

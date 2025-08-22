@@ -151,14 +151,7 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                     val request = Json.decodeFromString<CreateRoomRequest>(rawJsonBody) // Получаем DTO из тела запроса
                     val user = call.attributes[UserAttributeKey]
 
-                    // Стек игрока берем из запроса
-                    val ownerAsPlayer = Player(
-                        userId = user.id.toString(),
-                        username = user.username,
-                        stack = request.initialStack
-                    )
-
-                    val newRoom = gameRoomService.createRoom(request, ownerAsPlayer)
+                    val newRoom = gameRoomService.createRoom(request, user.id.toString(), user.username)
                     call.respond(HttpStatusCode.Created, newRoom)
                 }
 
@@ -203,15 +196,15 @@ fun Application.configureRouting(gameRoomService: GameRoomService) {
                     val user = call.attributes[UserAttributeKey]
 
                     // 3. Создаем объект Player и пытаемся присоединиться к комнате
-                    val player = Player(userId = user.id.toString(), username = user.username, stack = 1000) // todo stack count
-                    val updatedRoom = gameRoomService.joinRoom(roomId, player)
+                    val (updatedRoom, player) = gameRoomService.joinRoom(roomId, user.id.toString(), user.username)
                     println("updated room: $updatedRoom")
                     // 4. Отправляем ответ
                     if (updatedRoom == null) {
                         call.respond(HttpStatusCode.NotFound, "Room not found or is full")
                     } else {
-                        val playerJoinedMessage = OutgoingMessage.PlayerJoined(player)
-                        gameRoomService.broadcast(roomId, playerJoinedMessage)
+                        player?.let {
+                            gameRoomService.broadcast(roomId, OutgoingMessage.PlayerJoined(it))
+                        }
                         call.respond(HttpStatusCode.OK, updatedRoom)
                     }
                 }
