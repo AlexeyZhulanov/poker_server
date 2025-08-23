@@ -18,6 +18,7 @@ repositories {
 dependencies {
     implementation(libs.jbcrypt)
     implementation(libs.jwt.creator)
+    implementation(libs.kotlinx.collections.immutable)
 
     // Ktor plugins
     implementation(libs.ktor.server.core)

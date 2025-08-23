@@ -1,14 +1,16 @@
 package com.example.domain.model
 
+import kotlinx.collections.immutable.ImmutableList
+import kotlinx.collections.immutable.persistentListOf
 import kotlinx.serialization.Serializable
 
 @Serializable
 data class GameState(
     val roomId: String,
     val stage: GameStage = GameStage.PRE_FLOP,
-    val communityCards: List<Card> = emptyList(),
+    val communityCards: ImmutableList<Card> = persistentListOf(),
     val pot: Long = 0,
-    val playerStates: List<PlayerState> = emptyList(),
+    val playerStates: ImmutableList<PlayerState> = persistentListOf(),
     val dealerPosition: Int = 0,
     val activePlayerPosition: Int = 0,
     val lastRaiseAmount: Long = 0,

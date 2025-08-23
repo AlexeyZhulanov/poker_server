@@ -3,6 +3,8 @@ package com.example.domain.logic
 import com.example.domain.model.*
 import com.example.dto.ws.*
 import com.example.services.GameRoomService
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -176,7 +178,7 @@ class GameEngine(
                     stack = player.stack - totalContribution,
                     status = PlayerStatus.IN_HAND
                 ),
-                cards = deck.deal(2).sortedDescending(),
+                cards = deck.deal(2).sortedDescending().toImmutableList(),
                 currentBet = totalBet, // Анте идет сразу в банк, не считается частью ставки
                 handContribution = totalContribution,
                 hasActedThisRound = false,
@@ -188,7 +190,7 @@ class GameEngine(
         gameState = GameState(
             roomId = room.roomId,
             stage = GameStage.PRE_FLOP,
-            playerStates = initialPlayerStates,
+            playerStates = initialPlayerStates.toImmutableList(),
             dealerPosition = currentDealerPosition,
             activePlayerPosition = actionPos,
             pot = potFromBlindsAndAntes,
@@ -341,7 +343,7 @@ class GameEngine(
                 } else {
                     it
                 }
-            }
+            }.toImmutableList()
         )
     }
 
@@ -440,7 +442,7 @@ class GameEngine(
                     else -> true
                 }
                 if (shouldReset) ps.copy(hasActedThisRound = false) else ps
-            }
+            }.toImmutableList()
         )
     }
 
@@ -465,7 +467,7 @@ class GameEngine(
         ) }
         val nextAggressor = if (gameState.stage == GameStage.PRE_FLOP) null else gameState.lastAggressorPosition
         gameState = gameState.copy(
-            playerStates = newPlayerStates,
+            playerStates = newPlayerStates.toImmutableList(),
             amountToCall = 0,
             lastRaiseAmount = lastBigBlindAmount,
             lastAggressorPosition = nextAggressor
@@ -477,19 +479,19 @@ class GameEngine(
             GameStage.PRE_FLOP -> {
                 gameState = gameState.copy(
                     stage = GameStage.FLOP,
-                    communityCards = deck.deal(3)
+                    communityCards = deck.deal(3).toImmutableList()
                 )
             }
             GameStage.FLOP -> {
                 gameState = gameState.copy(
                     stage = GameStage.TURN,
-                    communityCards = gameState.communityCards + deck.deal(1)
+                    communityCards = (gameState.communityCards + deck.deal(1)).toImmutableList()
                 )
             }
             GameStage.TURN -> {
                 gameState = gameState.copy(
                     stage = GameStage.RIVER,
-                    communityCards = gameState.communityCards + deck.deal(1)
+                    communityCards = (gameState.communityCards + deck.deal(1)).toImmutableList()
                 )
             }
             GameStage.RIVER -> {
@@ -544,7 +546,7 @@ class GameEngine(
                         player = playerState.player.copy(stack = playerState.player.stack + (winners[playerState.player.userId] ?: 0L))
                     )
                 } else playerState
-            }
+            }.toImmutableList()
         )
         if(isNeedShow) {
             val payments = winners.map { it.key to it.value }
@@ -599,7 +601,7 @@ class GameEngine(
         if(!isGameStarted) return null
 
         val publicGameState = gameState.copy(
-            playerStates = gameState.playerStates.map { it.copy(cards = emptyList()) }
+            playerStates = gameState.playerStates.map { it.copy(cards = persistentListOf()) }.toImmutableList()
         )
         val playerStateInHand = gameState.playerStates.find { it.player.userId == userId }
         return if (playerStateInHand != null) {
@@ -608,11 +610,11 @@ class GameEngine(
                     val shouldHideCards = otherPlayerState.hasFolded ||
                             (otherPlayerState.player.userId != userId && gameState.stage != GameStage.SHOWDOWN)
                     if (shouldHideCards) {
-                        otherPlayerState.copy(cards = emptyList())
+                        otherPlayerState.copy(cards = persistentListOf())
                     } else {
                         otherPlayerState
                     }
-                }
+                }.toImmutableList()
             )
             personalizedState
         } else publicGameState
@@ -625,7 +627,7 @@ class GameEngine(
 
         // 2. Создаем "публичную" версию состояния, где все карты скрыты
         val publicGameState = gameState.copy(
-            playerStates = gameState.playerStates.map { it.copy(cards = emptyList()) }
+            playerStates = gameState.playerStates.map { it.copy(cards = persistentListOf()) }.toImmutableList()
         )
         val publicMessage = OutgoingMessage.GameStateUpdate(publicGameState)
 
@@ -645,11 +647,11 @@ class GameEngine(
                             // 2. ИЛИ если это не принудительное вскрытие, И это не наши карты, И это не шоудаун
                             (!forceRevealCards && otherPlayerState.player.userId != player.userId && gameState.stage != GameStage.SHOWDOWN)
                         if (shouldHideCards) {
-                            otherPlayerState.copy(cards = emptyList())
+                            otherPlayerState.copy(cards = persistentListOf())
                         } else {
                             otherPlayerState
                         }
-                    }
+                    }.toImmutableList()
                 )
                 val personalizedMessage = OutgoingMessage.GameStateUpdate(personalizedState)
                 gameRoomService.sendToPlayer(roomId, player.userId, personalizedMessage)
@@ -721,7 +723,7 @@ class GameEngine(
                 } else {
                     it
                 }
-            }
+            }.toImmutableList()
         )
 
         val contenders = gameState.playerStates.filter { !it.hasFolded }
@@ -751,7 +753,7 @@ class GameEngine(
 
                 // Обновляем GameState для этого прогона
                 val tempGameState = gameState.copy(
-                    communityCards = currentRunCommunityCards,
+                    communityCards = currentRunCommunityCards.toImmutableList(),
                     runIndex = run
                 )
                 gameRoomService.broadcast(roomId, OutgoingMessage.GameStateUpdate(tempGameState))
@@ -914,7 +916,7 @@ class GameEngine(
             }
         }
         // Обновляем основной gameState
-        gameState = gameState.copy(playerStates = updatedPlayerStates)
+        gameState = gameState.copy(playerStates = updatedPlayerStates.toImmutableList())
     }
 
     fun processSocialAction(senderUserId: String, action: SocialAction) {

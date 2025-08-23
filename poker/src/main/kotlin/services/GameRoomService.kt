@@ -12,6 +12,8 @@ import com.example.dto.CreateRoomRequest
 import com.example.dto.ws.OutgoingMessage
 import io.ktor.websocket.Frame
 import io.ktor.websocket.WebSocketSession
+import kotlinx.collections.immutable.persistentListOf
+import kotlinx.collections.immutable.toImmutableList
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -56,10 +58,10 @@ class GameRoomService : CoroutineScope {
             roomId = roomId,
             name = request.name,
             gameMode = request.gameMode,
-            players = listOf(owner), // Владелец сразу становится первым игроком
+            players = persistentListOf(owner), // Владелец сразу становится первым игроком
             maxPlayers = request.maxPlayers,
             ownerId = ownerId,
-            blindStructure = blindStructure,
+            blindStructure = blindStructure?.toImmutableList(),
             blindStructureType = request.blindStructureType,
             buyIn = stack
         )
@@ -88,7 +90,7 @@ class GameRoomService : CoroutineScope {
         }
         // Игрок всегда входит как SPECTATING
         val playerAsSpectator = Player(userId = userId, username = username, stack = room.buyIn, status = PlayerStatus.SPECTATING)
-        val updatedRoom = room.copy(players = room.players + playerAsSpectator)
+        val updatedRoom = room.copy(players = (room.players + playerAsSpectator).toImmutableList())
         rooms[roomId] = updatedRoom
         launch { broadcastLobbyUpdate() } // Оповещаем лобби об изменении состава комнаты
         return updatedRoom to playerAsSpectator
@@ -123,7 +125,7 @@ class GameRoomService : CoroutineScope {
         val updatedPlayers = room.players.map {
             if (it.userId == userId) it.copy(isConnected = isConnected) else it
         }
-        rooms[roomId] = room.copy(players = updatedPlayers)
+        rooms[roomId] = room.copy(players = updatedPlayers.toImmutableList())
         engines[roomId]?.updatePlayerConnectionStatus(userId, isConnected)
 
         // Рассылаем всем в комнате
@@ -137,7 +139,7 @@ class GameRoomService : CoroutineScope {
         val updatedPlayers = room.players.map {
             if (it.userId == userId) it.copy(missedTurns = it.missedTurns + 1) else it
         }
-        rooms[roomId] = room.copy(players = updatedPlayers)
+        rooms[roomId] = room.copy(players = updatedPlayers.toImmutableList())
     }
 
     fun resetMissedTurns(roomId: String, userId: String) {
@@ -145,7 +147,7 @@ class GameRoomService : CoroutineScope {
         val updatedPlayers = room.players.map {
             if (it.userId == userId) it.copy(missedTurns = 0) else it
         }
-        rooms[roomId] = room.copy(players = updatedPlayers)
+        rooms[roomId] = room.copy(players = updatedPlayers.toImmutableList())
     }
 
     private fun onLeave(roomId: String, userId: String) {
@@ -155,7 +157,7 @@ class GameRoomService : CoroutineScope {
 
         val room = rooms[roomId] ?: return
         val players = room.players.toMutableList()
-        val updatedRoom = room.copy(players = players.filterNot { it.userId == userId })
+        val updatedRoom = room.copy(players = players.filterNot { it.userId == userId }.toImmutableList())
         rooms[roomId] = updatedRoom
 
         engines[roomId]?.handlePlayerDisconnect(userId)
@@ -185,7 +187,7 @@ class GameRoomService : CoroutineScope {
         }
 
         // Обновляем комнату в нашем хранилище
-        rooms[roomId] = room.copy(players = updatedPlayers)
+        rooms[roomId] = room.copy(players = updatedPlayers.toImmutableList())
 
         // Рассылаем всем в комнате сообщение об изменении статуса
         broadcast(roomId, OutgoingMessage.PlayerStatusUpdate(userId, newStatus, newStack))
@@ -202,7 +204,7 @@ class GameRoomService : CoroutineScope {
             finalStatesMap[player.userId]?.player ?: player
         }
 
-        rooms[roomId] = room.copy(players = updatedPlayers)
+        rooms[roomId] = room.copy(players = updatedPlayers.toImmutableList())
     }
 
     suspend fun handleSitAtTable(roomId: String, userId: String) {
@@ -233,7 +235,7 @@ class GameRoomService : CoroutineScope {
 
         // Если игрок был найден и обновлен
         if (targetPlayer != null) {
-            val updatedRoom = room.copy(players = updatedPlayers)
+            val updatedRoom = room.copy(players = updatedPlayers.toImmutableList())
             rooms[roomId] = updatedRoom
 
             // Рассылаем всем обновление статуса и стека этого игрока
@@ -253,7 +255,7 @@ class GameRoomService : CoroutineScope {
             isReady = false,
             status = if(it.status == PlayerStatus.IN_HAND) PlayerStatus.SITTING_OUT else it.status
         ) }
-        val updatedRoom = room.copy(players = updatedPlayers)
+        val updatedRoom = room.copy(players = updatedPlayers.toImmutableList())
         rooms[roomId] = updatedRoom
     }
 
@@ -264,7 +266,7 @@ class GameRoomService : CoroutineScope {
             isReady = isReady,
             status = if (it.status == PlayerStatus.SPECTATING) it.status else PlayerStatus.SITTING_OUT
         ) else it }
-        val updatedRoom = room.copy(players = updatedPlayers)
+        val updatedRoom = room.copy(players = updatedPlayers.toImmutableList())
         rooms[roomId] = updatedRoom
 
         // Оповещаем всех об изменении статуса
@@ -279,7 +281,7 @@ class GameRoomService : CoroutineScope {
             val finalPlayers = updatedRoom.players.map {
                 if(it.status != PlayerStatus.SPECTATING && it.isReady) it.copy(status = PlayerStatus.IN_HAND) else it
             }
-            rooms[roomId] = updatedRoom.copy(players = finalPlayers)
+            rooms[roomId] = updatedRoom.copy(players = finalPlayers.toImmutableList())
 
             engines[roomId]?.startGame()
         }
