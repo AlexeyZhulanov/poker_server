@@ -3,7 +3,6 @@ package com.example.plugins
 import com.auth0.jwt.JWT
 import com.auth0.jwt.algorithms.Algorithm
 import com.example.data.repository.UserRepository
-import com.example.domain.model.Player
 import com.example.dto.AuthResponse
 import com.example.dto.CreateRoomRequest
 import com.example.dto.LoginRequest
