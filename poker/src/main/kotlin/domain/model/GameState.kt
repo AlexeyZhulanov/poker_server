@@ -12,7 +12,9 @@ data class GameState(
     val dealerPosition: Int = 0,
     val activePlayerPosition: Int = 0,
     val lastRaiseAmount: Long = 0,
+    val bigBlindAmount: Long = 0,
     val amountToCall: Long = 0, // Сколько нужно доставить, чтобы уравнять
     val lastAggressorPosition: Int? = null,
-    val runIndex: Int? = null
+    val runIndex: Int? = null,
+    val turnExpiresAt: Long? = null
 )

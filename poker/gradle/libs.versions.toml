@@ -1,6 +1,6 @@
 [versions]
-kotlin = "2.1.10"
-ktor = "3.2.0"
+kotlin = "2.2.10"
+ktor = "3.2.3"
 exposed = "0.61.0"
 postgres = "42.7.3"
 logback = "1.5.13"
@@ -10,6 +10,7 @@ jwt = "4.4.0"
 [libraries]
 jbcrypt = { module = "org.mindrot:jbcrypt", version.ref = "jbcrypt" }
 jwt-creator = { module = "com.auth0:java-jwt", version.ref = "jwt" }
+
 # Ktor
 ktor-server-core = { module = "io.ktor:ktor-server-core-jvm", version.ref = "ktor" }
 ktor-server-netty = { module = "io.ktor:ktor-server-netty-jvm", version.ref = "ktor" }

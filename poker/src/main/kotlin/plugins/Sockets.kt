@@ -1,7 +1,6 @@
 package com.example.plugins
 
 import com.example.dto.ws.IncomingMessage
-import com.example.dto.ws.OutgoingMessage
 import com.example.services.GameRoomService
 import io.ktor.server.application.*
 import io.ktor.server.auth.authenticate
@@ -77,7 +76,7 @@ fun Application.configureSockets(gameRoomService: GameRoomService) {
                             is IncomingMessage.AgreeRunCount -> engine?.processFavoriteRunConfirmation(userId, incomingMessage.isAgree)
                             is IncomingMessage.PerformSocialAction -> engine?.processSocialAction(userId, incomingMessage.action)
                             is IncomingMessage.SetReady -> gameRoomService.setPlayerReady(roomId, userId, incomingMessage.isReady)
-                            is IncomingMessage.SitAtTable -> gameRoomService.handleSitAtTable(roomId, userId, incomingMessage.buyIn)
+                            is IncomingMessage.SitAtTable -> gameRoomService.handleSitAtTable(roomId, userId)
                         }
                     }
                 } catch (e: Exception) {

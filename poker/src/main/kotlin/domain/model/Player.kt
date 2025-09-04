@@ -9,5 +9,6 @@ data class Player(
     val stack: Long,
     val status: PlayerStatus = PlayerStatus.SPECTATING,
     val isReady: Boolean = false,
-    val missedTurns: Int = 0
+    val missedTurns: Int = 0,
+    val isConnected: Boolean = true
 )
